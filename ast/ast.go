@@ -278,7 +278,7 @@ func (ce *CallExpression) String() string {
 	return out.String()
 }
 
-// Compile-time checks that each type satisfies the interface it claims to.
+// Compile-time checks to make sure that each type satisfies the interface it claims to.
 var (
 	// Root Node
 	_ Node = (*Program)(nil)

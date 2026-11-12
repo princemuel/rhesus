@@ -2,7 +2,7 @@
 
 [workspace]
 resolver = "3"
-members  = ["crates/*"]
+members  = ["crates/rhesus-cli", "crates/rhesus-core"]
 
 [workspace.package]
 version    = "0.1.0"
@@ -12,7 +12,10 @@ license    = "MIT OR Apache-2.0"
 publish    = false
 
 [workspace.dependencies]
-############################
+anyhow      = "1"
+rhesus-core = {
+  path = "crates/rhesus-core",
+}
 
 [workspace.lints.cargo]
 

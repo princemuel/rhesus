@@ -3,12 +3,10 @@
 # Settings
 # -----------------------------------------------
 
-max_width                   = 100
 unstable_features           = true
 # -----------------------------------------------
 # Stable Features
 # -----------------------------------------------
-chain_width                 = 60
 newline_style               = "Unix"
 use_field_init_shorthand    = true
 use_try_shorthand           = true
@@ -25,7 +23,6 @@ group_imports               = "StdExternalCrate"
 hex_literal_case            = "Lower"
 imports_granularity         = "Module"
 imports_layout              = "HorizontalVertical"
-match_arm_blocks            = true
 normalize_comments          = true
 normalize_doc_attributes    = true
 overflow_delimited_expr     = true

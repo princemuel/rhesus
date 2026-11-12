@@ -1,36 +1,7 @@
 * text=auto eol=lf
 
-# Source code (force LF)
-*.ts     text eol=lf
-*.tsx    text eol=lf
-*.js     text eol=lf
-*.json   text eol=lf
-*.rs     text eol=lf
-*.debug  text eol=lf
-
-# Windows batch scripts keep CRLF
-*.bat text eol=crlf
-
-# Generated code (don’t count in language stats)
-index.js                linguist-detectable=false
-index.d.ts              linguist-detectable=false
-*.wasi-browser.js       linguist-detectable=false
-*.wasi.cjs              linguist-detectable=false
-wasi-worker-browser.mjs linguist-detectable=false
-wasi-worker.mjs         linguist-detectable=false
-
-# Jest snapshots
-*.shot                  linguist-language=Jest-Snapshot
-*.shot                  linguist-generated
-
-# JSON with comments
-*.json                  linguist-language=JSON-with-Comments
-
-# Yarn / PnP internals
-/.yarn/**               linguist-vendored
-/.yarn/releases/*       binary
-/.yarn/plugins/**/*     binary
-/.pnp.*                 binary linguist-generated
+## SOURCE CODE
+*.bat      text eol=crlf
 
 ## GRAPHICS
 *.ai   binary
@@ -102,4 +73,8 @@ wasi-worker.mjs         linguist-detectable=false
 *.exe binary
 *.pyc binary
 
+# force github to treat out custom jest snapshot extension as normal jest snapshots
+*.shot linguist-language=Jest-Snapshot
+*.shot linguist-generated
 
+*.json  linguist-language=JSON-with-Comments

@@ -10,18 +10,16 @@ insert_final_newline = true
 end_of_line = lf
 indent_style = space
 indent_size = 2
-max_line_length = 108
+max_line_length = 120
 trim_trailing_whitespace = true
 
 [{*.db,*.sql,*.sqlite}]
 indent_size = 4
+max_line_length = 108
 
 [*.prisma]
 indent_size = 2
-
-[{*.scm,*.ss,*.rkt}]
-indent_size = unset
-max_line_length = 80
+max_line_length = 108
 
 [{*.py,*.pyi}]
 indent_size = 4
@@ -51,17 +49,11 @@ indent_size = 2
 
 [*.go]
 indent_style = tab
-indent_size = unset
-max_line_length = off
+indent_size = unset # Allow user-defined tab width
 
-[go.{mod,sum,work}]
+[Makefile]
 indent_style = tab
-indent_size = unset
-
-# make requires tabs in recipes.
-[{Makefile,*.mk}]
-indent_style = tab
-indent_size = unset
+indent_size = unset # Allow user-defined tab width
 
 [CMakeLists.txt]
 indent_size = 4
@@ -71,4 +63,5 @@ indent_size = 4
 
 [{*.md,*.mdx,*.mdoc}]
 indent_size = 2
+max_line_length = 108
 trim_trailing_whitespace = false

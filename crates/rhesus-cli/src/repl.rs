@@ -19,6 +19,7 @@ pub(crate) fn start(engine: Engine) -> Result<()> {
 
     writeln!(out, "Rhesus {} ({mode} mode)", env!("CARGO_PKG_VERSION"))?;
     writeln!(out, "Type Monkey code and press Enter. Press Ctrl+D to exit.\n")?;
+    writeln!(out, "Press Ctrl-D or enter \"quit\" to exit.")?;
     out.flush()?;
 
     loop {
@@ -48,6 +49,8 @@ pub(crate) fn start(engine: Engine) -> Result<()> {
                 break;
             }
             Err(ReadlineError::Eof) => {
+                writeln!(out, "CTRL-D")?;
+                out.flush()?;
                 break;
             }
             Err(err) => {

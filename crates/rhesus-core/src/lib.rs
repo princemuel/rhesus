@@ -1,10 +1,12 @@
 #![no_std]
+#![feature(core_io)]
 extern crate alloc;
 
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use core::cell::RefCell;
+use core::io::Write;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
@@ -28,7 +30,7 @@ impl Session {
     /// # Errors
     ///
     /// This function will return an error if .
-    pub fn eval_line(&mut self, input: &str) -> Result<String, String> {
+    pub fn eval_line<W: Write>(&mut self, input: &str, _out: &mut W) -> Result<String, String> {
         match self.engine {
             Engine::Eval => {
                 // TODO: Lexer -> Parser -> Evaluator::eval(program, &mut

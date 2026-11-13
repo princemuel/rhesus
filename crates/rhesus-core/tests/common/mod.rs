@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+use std::io::{BufWriter, stdout};
+
 use rhesus_core::{Engine, Session};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -13,8 +15,10 @@ pub(crate) enum Expected<'a> {
 
 /// Evaluates a Monkey snippet on a specific engine and checks the result
 pub(crate) fn assert_eval(engine: Engine, input: &str, expected: Expected<'_>) {
+    let mut out = BufWriter::new(stdout().lock());
     let mut session = Session::new(engine);
-    let actual = session.eval_line(input);
+
+    let actual = session.eval_line(input, &mut out);
 
     match (actual, expected) {
         (Ok(val), Expected::Int(n)) => {

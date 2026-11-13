@@ -1,12 +1,10 @@
 use alloc::borrow::Cow;
 use core::fmt;
-use core::iter::Peekable;
-use core::str::CharIndices;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Token<'a> {
     Illegal(char),
-    EOF,
+    Eof,
 
     // Identifiers + literals
     Ident(&'a str),
@@ -70,7 +68,7 @@ impl fmt::Display for Token<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Illegal(ch) => write!(f, "ILLEGAL({ch})"),
-            Self::EOF => write!(f, "EOF"),
+            Self::Eof => write!(f, "EOF"),
 
             // Identifiers + literals
             Self::Ident(ident) => write!(f, "{ident}"),

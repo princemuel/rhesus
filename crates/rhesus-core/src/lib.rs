@@ -4,6 +4,7 @@
 #![feature(const_cmp)]
 extern crate alloc;
 
+pub mod lexer;
 pub mod token;
 
 use alloc::format;

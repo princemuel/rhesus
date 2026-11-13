@@ -12,10 +12,7 @@ license    = "MIT OR Apache-2.0"
 publish    = false
 
 [workspace.dependencies]
-anyhow      = "1"
-rhesus-core = {
-  path = "crates/rhesus-core",
-}
+anyhow = "1"
 
 [workspace.lints.cargo]
 
@@ -239,5 +236,6 @@ panic         = "abort"
 codegen-units = 1
 
 [profile.dist]
-inherits = "release"
-strip    = true
+inherits  = "release"
+opt-level = "z"
+strip     = true

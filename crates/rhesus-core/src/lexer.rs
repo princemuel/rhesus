@@ -1,6 +1,6 @@
 use alloc::borrow::Cow;
 use alloc::string::String;
-use core::iter::Peekable;
+use core::iter::{FusedIterator, Peekable};
 use core::str::CharIndices;
 
 use crate::token::Token;
@@ -126,6 +126,16 @@ impl<'a> Lexer<'a> {
     }
 }
 
+impl<'a> Iterator for Lexer<'a> {
+    type Item = Token<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let token = self.next_token();
+        if token == Token::Eof { None } else { Some(token) }
+    }
+}
+impl FusedIterator for Lexer<'_> {}
+
 const fn is_letter(ch: char) -> bool { ch.is_ascii_alphabetic() || ch == '_' }
 
 #[cfg(test)]
@@ -135,7 +145,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_next_token() {
+    fn scenario_next_token() {
         let input = "=+(){},;";
 
         let expected = vec![

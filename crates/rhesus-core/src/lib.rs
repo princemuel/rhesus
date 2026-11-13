@@ -5,6 +5,7 @@
 extern crate alloc;
 
 pub mod lexer;
+pub mod prelude;
 pub mod token;
 
 use alloc::format;
@@ -12,11 +13,26 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use core::cell::RefCell;
 use core::io::Write;
+use core::str::FromStr;
+
+use crate::lexer::Lexer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
     Vm,
     Eval,
+}
+
+impl FromStr for Engine {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "vm" => Ok(Self::Vm),
+            "eval" => Ok(Self::Eval),
+            other => Err(format!("invalid engine '{other}', expected 'vm' or 'eval'")),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -35,9 +51,13 @@ impl Session {
     /// # Errors
     ///
     /// This function will return an error if .
-    pub fn eval_line<W: Write>(&mut self, input: &str, _out: &mut W) -> Result<String, String> {
+    pub fn eval_line<W: Write>(&mut self, input: &str, out: &mut W) -> Result<String, String> {
         match self.engine {
             Engine::Eval => {
+                for token in Lexer::new(input) {
+                    writeln!(out, "{token:?}").map_err(|err| format!("{err:?}"))?;
+                }
+
                 // TODO: Lexer -> Parser -> Evaluator::eval(program, &mut
                 // self.env)
                 Ok(format!("[eval] parsed {} bytes", input.len()))

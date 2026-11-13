@@ -1,0 +1,21 @@
+[package]
+name                 = "rhesus-cli"
+version.workspace    = true
+edition.workspace    = true
+repository.workspace = true
+license.workspace    = true
+publish.workspace    = true
+
+[[bin]]
+name = "rhesus"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+lexopt           = "0.3"
+rustyline        = "19"
+
+rhesus-core = { path = "../rhesus-core" }
+
+[lints]
+workspace = true

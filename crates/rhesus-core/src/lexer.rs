@@ -1,27 +1,33 @@
 use alloc::borrow::Cow;
 use alloc::string::String;
-use core::iter::{FusedIterator, Peekable};
-use core::str::CharIndices;
+use core::iter::FusedIterator;
 
 use crate::token::Token;
 
 #[derive(Clone, Debug)]
 pub struct Lexer<'a> {
-    input: &'a str,
-    chars: Peekable<CharIndices<'a>>,
+    rest: &'a str,
 }
 
 impl<'a> Lexer<'a> {
     #[must_use]
-    pub fn new(input: &'a str) -> Self { Self { input, chars: input.char_indices().peekable() } }
+    pub const fn new(input: &'a str) -> Self { Self { rest: input } }
 
     pub fn next_token(&mut self) -> Token<'a> {
         self.skip_whitespace();
 
-        let Some((start, ch)) = self.chars.next() else {
+        let Some(ch) = self.peek() else {
             return Token::Eof;
         };
 
+        if is_letter(ch) {
+            return Token::lookup_ident(self.consume_while(is_letter));
+        }
+        if ch.is_ascii_digit() {
+            return Token::Int(self.consume_while(|c| c.is_ascii_digit()));
+        }
+
+        self.advance();
         match ch {
             '=' => self.either('=', Token::Eq, Token::Assign),
             '+' => Token::Plus,
@@ -38,76 +44,90 @@ impl<'a> Lexer<'a> {
             '}' => Token::RBrace,
             '(' => Token::LParen,
             ')' => Token::RParen,
-            '"' => self.read_string(start + 1),
             '[' => Token::LBracket,
             ']' => Token::RBracket,
-            c if is_letter(c) => Token::lookup_ident(self.read_while(start, is_letter)),
-            c if c.is_ascii_digit() => Token::Int(self.read_while(start, |c| c.is_ascii_digit())),
+            '"' => self.read_string(),
             _ => Token::Illegal(ch),
         }
     }
 
+    /// Next char, without consuming it.
+    fn peek(&self) -> Option<char> { self.rest.chars().next() }
+
+    /// Consume and return the next char.
+    fn bump(&mut self) -> Option<char> {
+        let mut chars = self.rest.chars();
+        let ch = chars.next()?;
+        self.rest = chars.as_str();
+        Some(ch)
+    }
+
+    /// Consume the next char, if any.
+    fn advance(&mut self) { let _ = self.bump(); }
+
     fn either(&mut self, expected: char, matched: Token<'a>, unmatched: Token<'a>) -> Token<'a> {
-        match self.chars.next_if(|&(_, ch)| ch == expected) {
-            Some(_) => matched,
+        match self.rest.strip_prefix(expected) {
+            Some(tail) => {
+                self.rest = tail;
+                matched
+            }
             None => unmatched,
         }
     }
 
-    #[expect(dead_code)]
-    fn peek_char(&mut self) -> Option<char> { self.chars.peek().copied().map(|(_, ch)| ch) }
-
-    fn eat_while(&mut self, predicate: impl Fn(char) -> bool) {
-        while self.chars.next_if(|&(_, ch)| predicate(ch)).is_some() {}
+    fn skip_whitespace(&mut self) {
+        self.rest = self.rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
     }
 
-    #[expect(clippy::string_slice)]
-    fn read_while(&mut self, start: usize, predicate: impl Fn(char) -> bool) -> &'a str {
-        self.eat_while(predicate);
-        let end = self.chars.peek().map_or(self.input.len(), |&(idx, _)| idx);
-        &self.input[start..end]
+    /// Split off the longest prefix whose chars all satisfy `predicate`.
+    fn consume_while(&mut self, predicate: impl Fn(char) -> bool) -> &'a str {
+        let rest = self.rest;
+        let end = rest.find(|ch: char| !predicate(ch)).unwrap_or(rest.len());
+        let (token, tail) = rest.split_at(end);
+        self.rest = tail;
+        token
     }
 
-    #[expect(clippy::string_slice)]
-    fn read_string(&mut self, start: usize) -> Token<'a> {
+    /// Called after the opening `"` has been consumed.
+    fn read_string(&mut self) -> Token<'a> {
         let mut escaped: Option<String> = None;
-        let mut slice_start = start;
 
-        while let Some((idx, ch)) = self.chars.next() {
-            match ch {
-                '"' => {
-                    let Some(mut buf) = escaped else {
-                        return Token::String(Cow::Borrowed(&self.input[start..idx]));
-                    };
-                    buf.push_str(&self.input[slice_start..idx]);
+        loop {
+            let rest = self.rest;
+            let Some(idx) = rest.find(['"', '\\']) else {
+                self.rest = ""; // unterminated; swallow the remainder
+                return Token::Illegal('"');
+            };
+            let (chunk, tail) = rest.split_at(idx);
+            self.rest = tail;
 
-                    return Token::String(Cow::Owned(buf));
-                }
-                '\\' => {
-                    let buf = escaped.get_or_insert_with(String::new);
-                    buf.push_str(&self.input[slice_start..idx]);
-
-                    let Some((esc_idx, esc_ch)) = self.chars.next() else {
-                        return Token::Illegal('\\');
-                    };
-
-                    match esc_ch {
-                        'n' => buf.push('\n'),
-                        't' => buf.push('\t'),
-                        'r' => buf.push('\r'),
-                        '"' => buf.push('"'),
-                        '\\' => buf.push('\\'),
-                        other => buf.push(other),
+            // `tail` starts with the delimiter that `find` located.
+            if self.bump() == Some('"') {
+                return Token::String(match escaped {
+                    None => Cow::Borrowed(chunk),
+                    Some(mut buf) => {
+                        buf.push_str(chunk);
+                        Cow::Owned(buf)
                     }
-                    slice_start = esc_idx + esc_ch.len_utf8();
-                }
-                _ => {}
+                });
             }
-        }
-        Token::Illegal('"')
-    }
 
-    fn skip_whitespace(&mut self) { self.eat_while(|ch| ch.is_ascii_whitespace()); }
+            // Otherwise it was a backslash
+            let buf = escaped.get_or_insert_with(String::new);
+            buf.push_str(chunk);
+
+            let Some(esc) = self.bump() else {
+                return Token::Illegal('\\');
+            };
+
+            buf.push(match esc {
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                other => other, // covers `\"`, `\\`, and unknown escapes
+            });
+        }
+    }
 }
 
 impl<'a> Iterator for Lexer<'a> {

@@ -13,7 +13,7 @@ pub(crate) enum Expected<'a> {
     Err(&'a str), // Matches substring in runtime/compile error
 }
 
-/// Evaluates a Monkey snippet on a specific engine and checks the result
+/// Evaluates the code snippet on a specific engine and checks the result
 pub(crate) fn assert_eval(engine: Engine, input: &str, expected: Expected<'_>) {
     let mut out = BufWriter::new(stdout().lock());
     let mut session = Session::new(engine);
@@ -108,8 +108,8 @@ pub(crate) fn test_closures_and_functions(engine: Engine) {
         ("let add = fn(x, y) { x + y; }; add(5 + 5, add(5, 5));", Expected::Int(20)),
         (
             "let newAdder = fn(x) { fn(y) { x + y }; };
-             let addTwo = newAdder(2);
-             addTwo(3);",
+            let addTwo = newAdder(2);
+            addTwo(3);",
             Expected::Int(5),
         ),
     ];

@@ -1,6 +1,17 @@
 use alloc::borrow::Cow;
 use core::fmt;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Precedence {
+    Lowest,
+    Equals,      // == or !=
+    LessGreater, // > or <
+    Sum,         // + or -
+    Product,     // * or /
+    Prefix,      // -x or !x
+    Call,        // func(x)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Token<'a> {
     Illegal(char),
@@ -60,6 +71,17 @@ impl<'a> Token<'a> {
             "return" => Self::Return,
             "macro" => Self::Macro,
             _ => Self::Ident(ident),
+        }
+    }
+
+    pub(crate) const fn precedence(&self) -> Precedence {
+        match self {
+            Token::Eq | Token::NotEq => Precedence::Equals,
+            Token::Lt | Token::Gt => Precedence::LessGreater,
+            Token::Plus | Token::Minus => Precedence::Sum,
+            Token::Slash | Token::Asterisk => Precedence::Product,
+            Token::LParen => Precedence::Call,
+            _ => Precedence::Lowest,
         }
     }
 }

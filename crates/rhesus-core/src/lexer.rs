@@ -48,31 +48,23 @@ impl<'a> Lexer<'a> {
     }
 
     fn either(&mut self, expected: char, matched: Token<'a>, unmatched: Token<'a>) -> Token<'a> {
-        if self.peek_char() == Some(expected) {
-            let _next = self.chars.next();
-            matched
-        } else {
-            unmatched
+        match self.chars.next_if(|&(_, ch)| ch == expected) {
+            Some(_) => matched,
+            None => unmatched,
         }
     }
 
-    fn peek_char(&mut self) -> Option<char> { self.chars.peek().map(|&(_, ch)| ch) }
+    #[expect(dead_code)]
+    fn peek_char(&mut self) -> Option<char> { self.chars.peek().copied().map(|(_, ch)| ch) }
+
+    fn eat_while(&mut self, predicate: impl Fn(char) -> bool) {
+        while self.chars.next_if(|&(_, ch)| predicate(ch)).is_some() {}
+    }
 
     #[expect(clippy::string_slice)]
-    fn read_while<P>(&mut self, start: usize, predicate: P) -> &'a str
-    where
-        P: Fn(char) -> bool,
-    {
-        let mut end = self.input.len();
-        while let Some(&(idx, ch)) = self.chars.peek() {
-            if predicate(ch) {
-                let _next = self.chars.next();
-            } else {
-                end = idx;
-                break;
-            }
-        }
-
+    fn read_while(&mut self, start: usize, predicate: impl Fn(char) -> bool) -> &'a str {
+        self.eat_while(predicate);
+        let end = self.chars.peek().map_or(self.input.len(), |&(idx, _)| idx);
         &self.input[start..end]
     }
 
@@ -115,15 +107,7 @@ impl<'a> Lexer<'a> {
         Token::Illegal('"')
     }
 
-    fn skip_whitespace(&mut self) {
-        while let Some(&(_, ch)) = self.chars.peek() {
-            if ch.is_ascii_whitespace() {
-                let _next = self.chars.next();
-            } else {
-                break;
-            }
-        }
-    }
+    fn skip_whitespace(&mut self) { self.eat_while(|ch| ch.is_ascii_whitespace()); }
 }
 
 impl<'a> Iterator for Lexer<'a> {
@@ -140,6 +124,7 @@ const fn is_letter(ch: char) -> bool { ch.is_ascii_alphabetic() || ch == '_' }
 
 #[cfg(test)]
 mod tests {
+    use alloc::borrow::ToOwned as _;
     use alloc::vec;
 
     use super::*;
@@ -352,6 +337,52 @@ macro(x, y) { x + y; };
         let mut lexer = Lexer::new(input);
         for token in expected {
             assert_eq!(lexer.next_token(), token);
+        }
+
+        let input = r#"let five = 5;
+let add = fn(x, y) { x + y; };
+"hello world"
+"hello\nworld"
+10 == 10; 10 != 9;"#;
+
+        let expected = vec![
+            Token::Let,
+            Token::Ident("five"),
+            Token::Assign,
+            Token::Int("5"),
+            Token::Semicolon,
+            Token::Let,
+            Token::Ident("add"),
+            Token::Assign,
+            Token::Function,
+            Token::LParen,
+            Token::Ident("x"),
+            Token::Comma,
+            Token::Ident("y"),
+            Token::RParen,
+            Token::LBrace,
+            Token::Ident("x"),
+            Token::Plus,
+            Token::Ident("y"),
+            Token::Semicolon,
+            Token::RBrace,
+            Token::Semicolon,
+            Token::String(Cow::Borrowed("hello world")),
+            Token::String(Cow::Owned("hello\nworld".to_owned())),
+            Token::Int("10"),
+            Token::Eq,
+            Token::Int("10"),
+            Token::Semicolon,
+            Token::Int("10"),
+            Token::NotEq,
+            Token::Int("9"),
+            Token::Semicolon,
+            Token::Eof,
+        ];
+
+        let mut lexer = Lexer::new(input);
+        for exp in expected {
+            assert_eq!(lexer.next_token(), exp);
         }
     }
 }

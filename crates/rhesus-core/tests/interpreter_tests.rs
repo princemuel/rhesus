@@ -5,6 +5,10 @@ use rhesus_core::Engine;
 
 #[ignore = "evaluator not implemented yet"]
 #[test]
+fn eval_strings() { common::test_strings(Engine::Eval); }
+
+#[ignore = "evaluator not implemented yet"]
+#[test]
 fn eval_integer_arithmetic() { common::test_integer_arithmetic(Engine::Eval); }
 
 #[ignore = "evaluator not implemented yet"]

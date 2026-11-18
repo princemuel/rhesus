@@ -4,7 +4,7 @@ use std::io::{BufWriter, stdout};
 
 use rhesus_core::{Engine, Session};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Expected<'a> {
     Int(i64),
     Bool(bool),
@@ -50,16 +50,17 @@ pub(crate) fn assert_eval(engine: Engine, input: &str, expected: Expected<'_>) {
 
 /// Runs a table of (input, expected) test cases on the chosen engine
 pub(crate) fn run_cases(engine: Engine, cases: &[(&str, Expected<'_>)]) {
-    for (input, expected) in cases {
-        // Reconstruct Expected cleanly for each case
-        match expected {
-            Expected::Int(n) => assert_eval(engine, input, Expected::Int(*n)),
-            Expected::Bool(b) => assert_eval(engine, input, Expected::Bool(*b)),
-            Expected::Str(s) => assert_eval(engine, input, Expected::Str(s)),
-            Expected::Null => assert_eval(engine, input, Expected::Null),
-            Expected::Err(e) => assert_eval(engine, input, Expected::Err(e)),
-        }
+    for &(input, expected) in cases {
+        assert_eval(engine, input, expected);
     }
+}
+
+pub(crate) fn test_strings(engine: Engine) {
+    let cases = [
+        (r#""hello world""#, Expected::Str("hello world")),
+        (r#""foo" + "bar""#, Expected::Str("foobar")),
+    ];
+    run_cases(engine, &cases);
 }
 
 pub(crate) fn test_integer_arithmetic(engine: Engine) {

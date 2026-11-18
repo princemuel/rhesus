@@ -4,18 +4,24 @@
 #![feature(const_cmp)]
 extern crate alloc;
 
+pub mod ast;
+pub mod errors;
+pub mod evaluator;
 pub mod lexer;
+pub mod parser;
 pub mod prelude;
 pub mod token;
 
 use alloc::format;
 use alloc::rc::Rc;
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::io::Write;
 use core::str::FromStr;
 
 use crate::lexer::Lexer;
+use crate::parser::Parser;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
@@ -51,16 +57,15 @@ impl Session {
     /// # Errors
     ///
     /// This function will return an error if .
-    pub fn eval_line<W: Write>(&mut self, input: &str, out: &mut W) -> Result<String, String> {
+    pub fn eval_line<W: Write>(&mut self, input: &str, _out: &mut W) -> Result<String, String> {
         match self.engine {
             Engine::Eval => {
-                for token in Lexer::new(input) {
-                    writeln!(out, "{token:?}").map_err(|err| format!("{err:?}"))?;
-                }
+                let program = Parser::new(Lexer::new(input)).parse_program().map_err(|errors| {
+                    errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n  ")
+                })?;
 
-                // TODO: Lexer -> Parser -> Evaluator::eval(program, &mut
-                // self.env)
-                Ok(format!("[eval] parsed {} bytes", input.len()))
+                // TODO: Evaluator::eval(program, &mut self.env)
+                Ok(program.to_string())
             }
             Engine::Vm => {
                 // TODO: Lexer -> Parser -> Compiler::compile -> VM::run

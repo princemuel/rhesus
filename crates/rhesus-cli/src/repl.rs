@@ -104,6 +104,19 @@ fn run(rl: &mut DefaultEditor, engine: Engine) -> Result<()> {
     Ok(out.flush()?)
 }
 
+const MONKEY_FACE: &str = r#"            __,__
+   .--.  .-"     "-.  .--.
+  / .. \/  .-. .-.  \/ .. \
+ | |  '|  /   Y   \  |'  | |
+ | \   \  \ 0 | 0 /  /   / |
+  \ '- ,\.-"""""""-./, -' /
+   ''-' /_   ^ ^   _\ '-''
+       |  \._   _./  |
+       \   \ '~' /   /
+        '._ '-=-' _.'
+           '-----'
+"#;
+
 fn eval(
     session: &mut Session,
     src: &str,
@@ -114,7 +127,9 @@ fn eval(
         Ok(result) => writeln!(out, "{result}")?,
         Err(err) => {
             out.flush()?; // program output first, then the error
-            writeln!(err_out, "Woops! Monkey business:\n  {err}")?;
+            writeln!(err_out, "{MONKEY_FACE}")?;
+            writeln!(err_out, "Woops! We ran into some monkey business here!")?;
+            writeln!(err_out, "  parser errors:\n\t {err}")?;
         }
     }
     Ok(out.flush()?)

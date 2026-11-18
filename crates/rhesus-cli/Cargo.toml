@@ -11,9 +11,9 @@ name = "rhesus"
 path = "src/main.rs"
 
 [dependencies]
-anyhow.workspace = true
-lexopt           = "0.3"
-rustyline        = "19"
+anyhow    = "1"
+lexopt    = "0.3"
+rustyline = "19"
 
 rhesus-core = { path = "../rhesus-core" }
 

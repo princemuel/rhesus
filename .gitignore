@@ -1288,3 +1288,6 @@ prisma.rs
 scripts/readmes
 .pnp.cjs
 .pnp.loader.mjs
+
+.direnv/
+result

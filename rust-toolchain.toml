@@ -1,4 +1,5 @@
 #:schema https://www.schemastore.org/rust-toolchain.json
+
 [toolchain]
-channel = "nightly"
-profile = "default"
+channel    = "nightly-2026-11-18"
+components = ["rustc", "cargo", "clippy", "rustfmt", "rust-analyzer", "rust-src"]

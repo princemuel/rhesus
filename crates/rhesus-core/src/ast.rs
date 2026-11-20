@@ -5,7 +5,7 @@ use core::fmt;
 
 use crate::token::Token;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Block<'a>(pub Vec<Stmt<'a>>);
 
 impl fmt::Display for Block<'_> {

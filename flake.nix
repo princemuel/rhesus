@@ -38,10 +38,7 @@
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
-          cargoBuildFlags = [
-            "-p"
-            "rhesus-cli"
-          ];
+          cargoBuildFlags = [ "-p"  "rhesus-cli" ];
           cargoTestFlags = [ "--workspace" ];
         };
 
@@ -49,7 +46,7 @@
           packages = [
             toolchain
             pkgs.bacon
-            pkgs.nil
+            pkgs.nixd
             pkgs.nixfmt
           ];
           RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";

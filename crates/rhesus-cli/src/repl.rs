@@ -131,7 +131,7 @@ fn eval(
             out.flush()?; // flush program output first, before writing the error
             writeln!(err_out, "{MONKEY_FACE}")?;
             writeln!(err_out, "Woops! We ran into some monkey business here!")?;
-            writeln!(err_out, " parser errors:\n  {err}")?;
+            writeln!(err_out, "  parser errors:\n\t {err}")?;
         }
     }
     Ok(out.flush()?)

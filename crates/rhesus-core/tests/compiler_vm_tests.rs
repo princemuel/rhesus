@@ -1,28 +1,29 @@
-#![cfg(test)]
-mod common;
+// #![cfg(test)]
+// mod common;
 
-use rhesus_core::Engine;
+// use rhesus_core::Engine;
 
-#[test]
-#[ignore = "vm not implemented yet"]
-fn vm_strings() { common::test_strings(Engine::Vm); }
+// #[test]
+// #[ignore = "vm not implemented yet"]
+// fn vm_strings() { common::test_strings(Engine::Vm); }
 
-#[ignore = "vm not implemented yet"]
-#[test]
-fn vm_integer_arithmetic() { common::test_integer_arithmetic(Engine::Vm); }
+// #[ignore = "vm not implemented yet"]
+// #[test]
+// fn vm_integer_arithmetic() { common::test_integer_arithmetic(Engine::Vm); }
 
-#[ignore = "vm not implemented yet"]
-#[test]
-fn vm_boolean_expressions() { common::test_boolean_expressions(Engine::Vm); }
+// #[ignore = "vm not implemented yet"]
+// #[test]
+// fn vm_boolean_expressions() { common::test_boolean_expressions(Engine::Vm); }
 
-#[ignore = "vm not implemented yet"]
-#[test]
-fn vm_conditionals() { common::test_conditionals(Engine::Vm); }
+// #[ignore = "vm not implemented yet"]
+// #[test]
+// fn vm_conditionals() { common::test_conditionals(Engine::Vm); }
 
-#[ignore = "vm not implemented yet"]
-#[test]
-fn vm_closures_and_functions() { common::test_closures_and_functions(Engine::Vm); }
+// #[ignore = "vm not implemented yet"]
+// #[test]
+// fn vm_closures_and_functions() {
+// common::test_closures_and_functions(Engine::Vm); }
 
-#[ignore = "vm not implemented yet"]
-#[test]
-fn vm_error_handling() { common::test_error_handling(Engine::Vm); }
+// #[ignore = "vm not implemented yet"]
+// #[test]
+// fn vm_error_handling() { common::test_error_handling(Engine::Vm); }

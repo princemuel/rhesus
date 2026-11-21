@@ -2,24 +2,31 @@
 #![feature(core_io)]
 #![feature(const_trait_impl)]
 #![feature(const_cmp)]
+
 extern crate alloc;
 
 pub mod ast;
+pub mod builtins;
+pub mod environment;
 pub mod errors;
 pub mod evaluator;
+pub mod host;
 pub mod lexer;
+pub mod object;
 pub mod parser;
 pub mod prelude;
 pub mod token;
 
+use alloc::borrow::ToOwned as _;
+use alloc::boxed::Box;
 use alloc::format;
-use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::cell::RefCell;
-use core::io::Write;
 use core::str::FromStr;
 
+use crate::environment::Environment;
+use crate::evaluator::eval_program;
+use crate::host::Host;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 
@@ -45,31 +52,38 @@ impl FromStr for Engine {
 /// Persistent state across REPL lines (environments, globals, symbol tables)
 pub struct Session {
     pub engine: Engine,
-    _env: Rc<RefCell<()>>,
+    env: Environment<'static>,
 }
 
 impl Session {
-    #[must_use = ""]
-    pub fn new(engine: Engine) -> Self { Self { engine, _env: Rc::new(RefCell::new(())) } }
+    #[must_use]
+    pub fn new(engine: Engine) -> Self { Self { engine, env: Environment::new() } }
 
-    /// .
+    /// `Ok(None)` means "ran fine, nothing to print" (e.g. a `let`).
     ///
     /// # Errors
     ///
-    /// This function will return an error if .
-    pub fn eval_line<W: Write>(&mut self, input: &str, _out: &mut W) -> Result<String, String> {
+    /// Returns the parse errors or the runtime error, rendered as text.
+    pub fn eval_line(
+        &mut self,
+        input: &str,
+        host: &mut dyn Host,
+    ) -> Result<Option<String>, String> {
         match self.engine {
             Engine::Eval => {
-                let program = Parser::new(Lexer::new(input)).parse_program().map_err(|errors| {
-                    errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n  ")
+                let source: &'static str = Box::leak(input.to_owned().into_boxed_str());
+
+                let program = Parser::new(Lexer::new(source)).parse_program().map_err(|errs| {
+                    errs.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n  ")
                 })?;
 
-                // TODO: Evaluator::eval(program, &mut self.env)
-                Ok(program.to_string())
+                let value =
+                    eval_program(&program, &self.env, host).map_err(|err| err.to_string())?;
+                Ok(value.map(|v| v.to_string()))
             }
             Engine::Vm => {
                 // TODO: Lexer -> Parser -> Compiler::compile -> VM::run
-                Ok(format!("[vm] compiled & ran {} bytes", input.len()))
+                Ok(Some(format!("[vm] compiled & ran {} bytes", input.len())))
             }
         }
     }

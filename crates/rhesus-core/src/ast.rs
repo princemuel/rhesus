@@ -56,22 +56,42 @@ pub enum Expr<'a> {
     Int(i64),
     String(Cow<'a, str>),
     Boolean(bool),
-    Prefix { op: PrefixOp, right: Box<Self> },
-    Infix { left: Box<Self>, op: InfixOp, right: Box<Self> },
+    Array(Vec<Self>),
+    Hash(Vec<(Self, Self)>),
+    Index { lhs: Box<Self>, index: Box<Self> },
+    Prefix { op: PrefixOp, rhs: Box<Self> },
+    Infix { lhs: Box<Self>, op: InfixOp, rhs: Box<Self> },
     If { condition: Box<Self>, consequence: Block<'a>, alternative: Option<Block<'a>> },
     Function { params: Vec<&'a str>, body: Block<'a> },
     Call { function: Box<Self>, args: Vec<Self> },
 }
 
+#[expect(clippy::use_debug)]
 impl fmt::Display for Expr<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ident(name) => write!(f, "{name}"),
             Self::Int(val) => write!(f, "{val}"),
-            Self::String(s) => write!(f, "{s}"),
+            Self::String(s) => write!(f, "{s:?}"),
             Self::Boolean(b) => write!(f, "{b}"),
-            Self::Prefix { op, right } => write!(f, "({op} {right})"),
-            Self::Infix { left, op, right } => write!(f, "({op} {left} {right})"),
+            Self::Array(items) => {
+                write!(f, "(array")?;
+                for item in items {
+                    write!(f, " {item}")?;
+                }
+                write!(f, ")")
+            }
+            Self::Hash(pairs) => {
+                write!(f, "(hash")?;
+
+                for (key, value) in pairs {
+                    write!(f, " ({key} {value})")?;
+                }
+                write!(f, ")")
+            }
+            Self::Index { lhs, index } => write!(f, "(index {lhs} {index})"),
+            Self::Prefix { op, rhs: right } => write!(f, "({op} {right})"),
+            Self::Infix { lhs: left, op, rhs: right } => write!(f, "({op} {left} {right})"),
             Self::If { condition, consequence, alternative: None } => {
                 write!(f, "(if {condition} {consequence})")
             }
@@ -143,12 +163,14 @@ pub enum Precedence {
     Product,     // * /
     Prefix,      // -x !x
     Call,        // f(x)
+    Index,       // a[i]
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum Infix {
     Binary(InfixOp),
     Call,
+    Index,
 }
 
 #[must_use]
@@ -167,6 +189,7 @@ pub const fn infix_rule(token: &Token<'_>) -> Option<(Precedence, Infix)> {
         Token::Slash => (P::Product, Binary(InfixOp::Slash)),
         Token::Asterisk => (P::Product, Binary(InfixOp::Asterisk)),
         Token::LParen => (P::Call, Call),
+        Token::LBracket => (P::Index, Infix::Index),
         _ => return None,
     })
 }

@@ -90,15 +90,18 @@ impl<'a> Parser<'a> {
             self.advance(); // the operator or `(`
 
             left = match rule {
-                Infix::Binary(op) => Expr::Infix {
-                    left: Box::new(left),
-                    op,
-                    right: Box::new(self.parse_expr(prec)?),
-                },
+                Infix::Binary(op) => {
+                    Expr::Infix { lhs: Box::new(left), op, rhs: Box::new(self.parse_expr(prec)?) }
+                }
                 Infix::Call => Expr::Call {
                     function: Box::new(left),
                     args: self.parse_list(&Token::RParen, |p| p.parse_expr(Precedence::Lowest))?,
                 },
+                Infix::Index => {
+                    let index = self.parse_expr(Precedence::Lowest)?;
+                    self.expect(&Token::RBracket, "']'")?;
+                    Expr::Index { lhs: Box::new(left), index: Box::new(index) }
+                }
             };
         }
         Ok(left)
@@ -122,13 +125,17 @@ impl<'a> Parser<'a> {
             }
             Token::If => self.parse_if(),
             Token::Function => self.parse_function(),
+            Token::LBracket => Ok(Expr::Array(
+                self.parse_list(&Token::RBracket, |p| p.parse_expr(Precedence::Lowest))?,
+            )),
+            Token::LBrace => self.parse_hash(),
             found => Err(ParseError::UnexpectedToken { expected: "expr", got: found }),
         }
     }
 
     fn parse_unary(&mut self, op: PrefixOp) -> ParseResult<'a, Expr<'a>> {
         let right = Box::new(self.parse_expr(Precedence::Prefix)?);
-        Ok(Expr::Prefix { op, right })
+        Ok(Expr::Prefix { op, rhs: right })
     }
 
     fn parse_if(&mut self) -> ParseResult<'a, Expr<'a>> {
@@ -172,6 +179,17 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_hash(&mut self) -> ParseResult<'a, Expr<'a>> {
+        let pairs = self.parse_list(&Token::RBrace, |p| {
+            let key = p.parse_expr(Precedence::Lowest)?;
+            p.expect(&Token::Colon, "':'")?;
+
+            let value = p.parse_expr(Precedence::Lowest)?;
+            Ok((key, value))
+        })?;
+        Ok(Expr::Hash(pairs))
+    }
+
     fn advance(&mut self) { drop(self.tokens.next()); }
 
     /// Consume the next token if it equals `expected`.
@@ -199,12 +217,13 @@ impl<'a> Parser<'a> {
 
     /// Error recovery: drop tokens through the next `;`.
     fn skip_past_semicolon(&mut self) {
-        let _ = self.tokens.by_ref().any(|t| t == Token::Semicolon);
+        let _ = self.tokens.by_ref().any(|token| token == Token::Semicolon);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloc::borrow::Cow;
     use alloc::string::{String, ToString};
     use alloc::vec;
 
@@ -231,6 +250,8 @@ mod tests {
         Parser::new(Lexer::new(src)).parse_program().expect_err("expected parse errors")
     }
 
+    fn string_lit(s: &str) -> Expr<'_> { Expr::String(Cow::Borrowed(s)) }
+
     fn int(value: i64) -> Expr<'static> { Expr::Int(value) }
 
     fn ident(name: &str) -> Expr<'_> { Expr::Ident(name) }
@@ -238,11 +259,11 @@ mod tests {
     fn boolean(value: bool) -> Expr<'static> { Expr::Boolean(value) }
 
     fn prefix(op: PrefixOp, right: Expr<'_>) -> Expr<'_> {
-        Expr::Prefix { op, right: Box::new(right) }
+        Expr::Prefix { op, rhs: Box::new(right) }
     }
 
     fn infix<'a>(left: Expr<'a>, op: InfixOp, right: Expr<'a>) -> Expr<'a> {
-        Expr::Infix { left: Box::new(left), op, right: Box::new(right) }
+        Expr::Infix { lhs: Box::new(left), op, rhs: Box::new(right) }
     }
 
     #[test]
@@ -262,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operator_precedence_formatting() {
+    fn operator_precedence_formatting() {
         assert_eq!(s_expr("-a * b + c == d / e"), "(== (+ (* (- a) b) c) (/ d e))");
     }
 
@@ -383,6 +404,11 @@ mod tests {
                 "(call add a b 1 (* 2 3) (+ 4 5) (call add 6 (* 7 8)))",
             ),
             ("add(a + b + c * d / f + g)", "(call add (+ (+ (+ a b) (/ (* c d) f)) g))"),
+            ("a * [1, 2, 3, 4][b * c] * d", "(* (* a (index (array 1 2 3 4) (* b c))) d)"),
+            (
+                "add(a * b[2], b[1], 2 * [1, 2][1])",
+                "(call add (* a (index b 2)) (index b 1) (* 2 (index (array 1 2) 1)))",
+            ),
         ];
         for (input, want) in tests {
             assert_eq!(s_expr(input), want, "input: {input}");
@@ -458,6 +484,47 @@ mod tests {
     }
 
     #[test]
+    fn string_literal_expression() {
+        assert_eq!(single_expr(r#""hello world";"#), string_lit("hello world"));
+    }
+
+    #[test]
+    fn array_literals_parsing() {
+        assert_eq!(single_expr("[]"), Expr::Array(vec![]));
+        assert_eq!(s_expr("[1, 2 * 2, 3 + 3]"), "(array 1 (* 2 2) (+ 3 3))");
+    }
+
+    #[test]
+    fn index_expressions_parsing() {
+        assert_eq!(s_expr("myArray[1 + 1]"), "(index myArray (+ 1 1))");
+    }
+
+    #[test]
+    fn hash_literals_parsing() {
+        assert_eq!(single_expr("{}"), Expr::Hash(vec![]));
+        assert_eq!(
+            single_expr(r#"{"one": 1, "two": 2, "three": 3}"#),
+            Expr::Hash(vec![
+                (string_lit("one"), int(1)),
+                (string_lit("two"), int(2)),
+                (string_lit("three"), int(3)),
+            ])
+        );
+        assert_eq!(
+            single_expr("{true: 1, false: 2}"),
+            Expr::Hash(vec![(boolean(true), int(1)), (boolean(false), int(2))])
+        );
+        assert_eq!(
+            single_expr("{1: 1, 2: 2, 3: 3}"),
+            Expr::Hash(vec![(int(1), int(1)), (int(2), int(2)), (int(3), int(3))])
+        );
+        assert_eq!(
+            s_expr(r#"{"one": 0 + 1, "two": 10 - 8, "three": 15 / 5}"#),
+            r#"(hash ("one" (+ 0 1)) ("two" (- 10 8)) ("three" (/ 15 5)))"#
+        );
+    }
+
+    #[test]
     fn let_statement_errors() {
         let errs = errors("let x 5;\nlet = 10;\nlet 838383;");
         assert_eq!(errs.len(), 3);
@@ -480,8 +547,10 @@ mod tests {
 
     #[test]
     fn bare_block_is_not_a_statement() {
+        // `{` in expression position is a hash literal, so a block fails at the
+        // missing `:`.
         let errs = errors("{ x }");
-        assert!(matches!(errs[0], ParseError::UnexpectedToken { expected: "expr", .. }));
+        assert!(matches!(errs[0], ParseError::UnexpectedToken { expected: "':'", .. }));
     }
 
     #[test]

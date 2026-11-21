@@ -2,14 +2,14 @@ use std::env;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use rhesus_core::host::WriterHost;
 use rhesus_core::{Engine, Session};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
 use crate::user::username;
 
-pub(crate) fn start(engine: Engine) -> Result<()> {
+pub(crate) fn start(engine: Engine) -> crate::Result<()> {
     let mut rl = DefaultEditor::new()?;
     let history = history_path();
 
@@ -52,7 +52,6 @@ impl State {
             (_, Input::Eof | Input::Line(".exit" | "quit"))
             | (Self::ExitArmed, Input::Interrupt) => (self, Action::Quit),
             (Self::Idle, Input::Interrupt) => (Self::ExitArmed, Action::ShowHint),
-            // Any real input disarms the exit.
             (_, Input::Line("")) => (Self::Idle, Action::Nothing),
             (_, Input::Line(src)) => (Self::Idle, Action::Eval(src)),
         }
@@ -67,7 +66,7 @@ enum Action<'a> {
     Quit,
 }
 
-fn run(rl: &mut DefaultEditor, engine: Engine) -> Result<()> {
+fn run(rl: &mut DefaultEditor, engine: Engine) -> crate::Result<()> {
     let mut session = Session::new(engine);
     let mut out = BufWriter::new(io::stdout().lock());
     let mut err_out = io::stderr().lock();
@@ -81,7 +80,7 @@ fn run(rl: &mut DefaultEditor, engine: Engine) -> Result<()> {
             Ok(line) => Input::Line(line.trim()),
             Err(ReadlineError::Interrupted) => Input::Interrupt,
             Err(ReadlineError::Eof) => Input::Eof,
-            Err(err) => bail!("REPL error: {err}"),
+            Err(err) => return Err(format!("REPL error: {err}").into()),
         };
 
         let (next, action) = state.on(input);
@@ -122,25 +121,27 @@ fn eval(
     src: &str,
     out: &mut impl Write,
     err_out: &mut impl Write,
-) -> Result<()> {
-    match session.eval_line(src, out) {
-        Ok(result) => writeln!(out, "{result}")?,
+) -> crate::Result<()> {
+    let result = session.eval_line(src, &mut WriterHost(&mut *out));
+
+    match result {
+        Ok(Some(value)) => writeln!(out, "{value}")?,
+        Ok(None) => {}
         Err(err) => {
-            out.flush()?; // program output first, then the error
+            out.flush()?; // flush program output first, before writing the error
             writeln!(err_out, "{MONKEY_FACE}")?;
-            writeln!(err_out, "Woops! We ran into some monkey business here!")?;
-            writeln!(err_out, "  parser errors:\n\t {err}")?;
+            writeln!(err_out, "Woops! Monkey business:\n  {err}")?;
         }
     }
     Ok(out.flush()?)
 }
 
-fn banner(out: &mut impl Write, engine: Engine) -> Result<()> {
+fn banner(out: &mut impl Write, engine: Engine) -> crate::Result<()> {
     let mode = match engine {
         Engine::Eval => "interpreter",
         Engine::Vm => "bytecode VM",
     };
-    let name = username().unwrap_or_else(|| "there".to_owned());
+    let name = username().unwrap_or_else(|| "there".to_owned()).to_lowercase();
 
     writeln!(out, "Rhesus {} ({mode}) on {}", env!("CARGO_PKG_VERSION"), env::consts::OS)?;
     writeln!(out, "Hello {name}! Type \"quit\" or press Ctrl+D to exit.")?;

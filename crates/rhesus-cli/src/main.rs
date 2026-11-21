@@ -6,12 +6,25 @@ mod user;
 use std::fs;
 use std::io::{BufWriter, Write as _, stdout};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
-use anyhow::{Context as _, Result, bail};
 use lexopt::prelude::*;
+use rhesus_core::host::WriterHost;
 use rhesus_core::{Engine, Session};
 
-fn main() -> Result<()> {
+type Result<T = ()> = core::result::Result<T, Box<dyn core::error::Error>>;
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("Error: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     match parse_args()? {
         Command::Help => write!(stdout().lock(), "{HELP}")?,
         Command::Version => writeln!(stdout().lock(), "rhesus {}", env!("CARGO_PKG_VERSION"))?,
@@ -21,11 +34,14 @@ fn main() -> Result<()> {
             let mut out = BufWriter::new(stdout().lock());
             let mut session = Session::new(engine);
 
-            match session.eval_line(&source, &mut out) {
-                Ok(output) => writeln!(out, "{output}")?,
+            let result = session.eval_line(&source, &mut WriterHost(&mut out));
+
+            match result {
+                Ok(Some(output)) => writeln!(out, "{output}")?,
+                Ok(None) => {}
                 Err(err) => {
                     out.flush()?;
-                    bail!("{err}");
+                    return Err(err.into());
                 }
             }
             out.flush()?;
@@ -44,7 +60,8 @@ fn main() -> Result<()> {
 }
 
 fn read_source(file: &Path) -> Result<String> {
-    fs::read_to_string(file).with_context(|| format!("Failed to read file: {}", file.display()))
+    fs::read_to_string(file)
+        .map_err(|err| format!("Failed to read file: {}: {err}", file.display()).into())
 }
 
 const HELP: &str = "\
@@ -93,22 +110,28 @@ fn parse_args() -> Result<Command> {
     match subcommand.as_deref() {
         None | Some("repl") => {
             if let Some(extra) = file {
-                bail!("Unexpected argument '{}'. Usage: rhesus repl", extra.display());
+                return Err(format!(
+                    "Unexpected argument '{}'. Usage: rhesus repl",
+                    extra.display()
+                )
+                .into());
             }
             Ok(Command::Repl { engine })
         }
         Some("run") => {
-            let file = file.context("Missing file path. Usage: rhesus run <FILE>")?;
+            let file = file.ok_or("Missing file path. Usage: rhesus run <FILE>")?;
             Ok(Command::Run { file, engine })
         }
         Some("eval") => {
-            let file = file.context("Missing file path. Usage: rhesus eval <FILE>")?;
+            let file = file.ok_or("Missing file path. Usage: rhesus eval <FILE>")?;
             Ok(Command::Run { file, engine: Engine::Eval })
         }
         Some("compile") => {
-            let file = file.context("Missing file path. Usage: rhesus compile <FILE>")?;
+            let file = file.ok_or("Missing file path. Usage: rhesus compile <FILE>")?;
             Ok(Command::Compile { file })
         }
-        Some(unknown) => bail!("Unknown subcommand '{unknown}'. Run 'rhesus --help' for usage."),
+        Some(unknown) => {
+            Err(format!("Unknown subcommand '{unknown}'. Run 'rhesus --help' for usage.").into())
+        }
     }
 }

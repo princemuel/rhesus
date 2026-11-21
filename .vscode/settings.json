@@ -8,12 +8,12 @@
     "source.fixAll": "explicit",
     "source.organizeImports": "explicit",
     "source.sortImports": "explicit",
-    "source.removeUnusedImports": "explicit",
+    "source.removeUnusedImports": "explicit"
   },
   "dotenv.enableAutocloaking": false,
   "editor.defaultFormatter": "esbenp.prettier-vscode",
   "[shellscript]": {
-    "editor.defaultFormatter": "mads-hartmann.bash-ide-vscode",
+    "editor.defaultFormatter": "mads-hartmann.bash-ide-vscode"
   },
   // Rust Analyzer settings
   "rust-analyzer.rustc.source": "discover",
@@ -40,17 +40,17 @@
   "rust-analyzer.inlayHints.parameterHints.enable": false,
 
   // Formatting with rustfmt
-  "rust-analyzer.rustfmt.extraArgs": ["+nightly"],
+  "rust-analyzer.server.path": "rust-analyzer",
   "[rust]": {
     "editor.defaultFormatter": "rust-lang.rust-analyzer",
-    "editor.formatOnSave": true,
+    "editor.formatOnSave": true
   },
   "rust-analyzer.testExplorer": true,
   "rust-analyzer.semanticHighlighting.doc.comment.inject.enable": true,
   "rust-analyzer.semanticHighlighting.punctuation.enable": true,
   "rust-analyzer.semanticHighlighting.punctuation.specialization.enable": true,
   "workbench.editor.customLabels.patterns": {
-    "**/mod.rs": "${dirname}.rs",
+    "**/mod.rs": "${dirname}.rs"
   },
 
   "[nix]": { "editor.defaultFormatter": "jnoortheen.nix-ide" },
@@ -59,7 +59,7 @@
   "nix.serverSettings": {
     "nixd": {
       "formatting": { "command": ["nixfmt"] },
-      "nixpkgs": { "expr": "import (builtins.getFlake (builtins.toString ./.)).inputs.nixpkgs { }" },
-    },
-  },
+      "nixpkgs": { "expr": "import (builtins.getFlake (builtins.toString ./.)).inputs.nixpkgs { }" }
+    }
+  }
 }

@@ -2,7 +2,7 @@
 
 [workspace]
 resolver = "3"
-members  = ["crates/rhesus-cli", "crates/rhesus-core"]
+members  = ["crates/rhesus-cli", "crates/rhesus-core", "crates/rhesus-wasm"]
 
 [workspace.package]
 version    = "0.1.0"
@@ -12,6 +12,7 @@ license    = "MIT OR Apache-2.0"
 publish    = false
 
 [workspace.dependencies]
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 
 [workspace.lints.cargo]
 

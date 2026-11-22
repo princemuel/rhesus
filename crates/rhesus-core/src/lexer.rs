@@ -21,7 +21,7 @@ impl<'a> Lexer<'a> {
         };
 
         if is_letter(ch) {
-            return lookup_ident(self.consume_while(is_letter));
+            return lookup_ident(self.consume_while(is_ident));
         }
         if ch.is_ascii_digit() {
             return Token::Int(self.consume_while(|c| c.is_ascii_digit()));
@@ -133,20 +133,25 @@ impl<'a> Iterator for Lexer<'a> {
 }
 impl FusedIterator for Lexer<'_> {}
 
+/// An ident usually starts with a letter but may continue with digits e.g `x1`,
+/// `add2`
+const fn is_ident(ch: char) -> bool { is_letter(ch) || ch.is_ascii_digit() }
+
 const fn is_letter(ch: char) -> bool { ch.is_ascii_alphabetic() || ch == '_' }
 
 #[must_use]
 pub const fn lookup_ident(ident: &str) -> Token<'_> {
+    use Token::{Else, False, Function, Ident, If, Let, Macro, Return, True};
     match ident {
-        "fn" => Token::Function,
-        "let" => Token::Let,
-        "true" => Token::True,
-        "false" => Token::False,
-        "if" => Token::If,
-        "else" => Token::Else,
-        "return" => Token::Return,
-        "macro" => Token::Macro,
-        _ => Token::Ident(ident),
+        "fn" => Function,
+        "let" => Let,
+        "true" => True,
+        "false" => False,
+        "if" => If,
+        "else" => Else,
+        "return" => Return,
+        "macro" => Macro,
+        _ => Ident(ident),
     }
 }
 
@@ -277,5 +282,61 @@ if (5 < 10) {
         for (i, want) in expected.into_iter().enumerate() {
             assert_eq!(lexer.next_token(), want, "tests[{i}]");
         }
+    }
+
+    #[test]
+    fn identifiers_may_contain_digits_but_not_start_with_one() {
+        let mut lexer = Lexer::new("add2 x1 _y2 2x");
+        let want = [Ident("add2"), Ident("x1"), Ident("_y2"), Int("2"), Ident("x"), Eof];
+        for token in want {
+            assert_eq!(lexer.next_token(), token);
+        }
+    }
+    #[test]
+    fn keywords_are_still_recognised_and_longer_words_are_not() {
+        let mut lexer = Lexer::new("let letter let1 fn fn2 macro macros");
+        let want = [
+            Let,
+            Ident("letter"),
+            Ident("let1"),
+            Function,
+            Ident("fn2"),
+            Macro,
+            Ident("macros"),
+            Eof,
+        ];
+        for token in want {
+            assert_eq!(lexer.next_token(), token);
+        }
+    }
+
+    #[test]
+    fn quote_and_unquote_are_plain_identifiers() {
+        let mut lexer = Lexer::new("quote(unquote(x))");
+        let want =
+            [Ident("quote"), LParen, Ident("unquote"), LParen, Ident("x"), RParen, RParen, Eof];
+        for token in want {
+            assert_eq!(lexer.next_token(), token);
+        }
+    }
+
+    #[test]
+    fn unterminated_string_and_dangling_escape_are_illegal() {
+        assert_eq!(Lexer::new("\"abc").next_token(), Illegal('"'));
+        assert_eq!(Lexer::new("\"abc\\").next_token(), Illegal('\\'));
+    }
+
+    #[test]
+    fn string_escapes() {
+        let mut lexer = Lexer::new(r#""a\tb" "q\"q" "back\\slash""#);
+        assert_eq!(lexer.next_token(), String(Cow::Owned("a\tb".to_owned())));
+        assert_eq!(lexer.next_token(), String(Cow::Owned("q\"q".to_owned())));
+        assert_eq!(lexer.next_token(), String(Cow::Owned("back\\slash".to_owned())));
+    }
+
+    #[test]
+    fn lexer_is_an_iterator_that_stops_at_eof() {
+        let tokens: vec::Vec<_> = Lexer::new("1 + 2").collect();
+        assert_eq!(tokens, [Int("1"), Plus, Int("2")]);
     }
 }

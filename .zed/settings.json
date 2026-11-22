@@ -22,7 +22,7 @@
           "preferPrelude": true,
         },
         "inlayHints": { "typeHints": { "enable": true }, "chainingHints": { "enable": true } },
-        "rustfmt": { "extraArgs": ["+nightly"] },
+        "server": { "path": "rust-analyzer" },
         "semanticHighlighting": {
           "doc": { "comment": { "inject": { "enable": true } } },
           "punctuation": { "enable": true, "specialization": { "enable": true } },

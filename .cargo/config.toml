@@ -6,4 +6,4 @@ global-min-publish-age = "3 days"
 
 [target.'cfg(target_os = "linux")']
 linker    = "clang"
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+rustflags = ["-Zunstable-options", "--jobs-frontend=4", "-C", "link-arg=-fuse-ld=mold"]

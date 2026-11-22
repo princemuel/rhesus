@@ -28,6 +28,7 @@ impl<'a> Lexer<'a> {
         }
 
         self.advance();
+
         match ch {
             '=' => self.either('=', Token::Eq, Token::Assign),
             '+' => Token::Plus,
@@ -143,13 +144,13 @@ const fn is_letter(ch: char) -> bool { ch.is_ascii_alphabetic() || ch == '_' }
 pub const fn lookup_ident(ident: &str) -> Token<'_> {
     use Token::{Else, False, Function, Ident, If, Let, Macro, Return, True};
     match ident {
-        "fn" => Function,
         "let" => Let,
+        "return" => Return,
         "true" => True,
         "false" => False,
         "if" => If,
         "else" => Else,
-        "return" => Return,
+        "fn" => Function,
         "macro" => Macro,
         _ => Ident(ident),
     }
@@ -164,7 +165,7 @@ mod tests {
     use crate::token::Token::*;
 
     #[test]
-    fn scenario_next_token() {
+    fn scan_next_token() {
         let input = "=+(){},;";
 
         let expected = vec![Assign, Plus, LParen, RParen, LBrace, RBrace, Comma, Semicolon, Eof];
@@ -194,7 +195,7 @@ macro(x, y) { x + y; };
 "#;
 
         #[rustfmt::skip]
-        let expected = vec![
+        let list = vec![
             Bang, Minus, Slash, Asterisk, Int("5"), Semicolon,
             Int("5"), Lt, Int("10"), Gt, Int("5"), Semicolon,
             If, LParen, Int("5"), Lt, Int("10"), RParen,
@@ -213,7 +214,7 @@ macro(x, y) { x + y; };
         ];
 
         let mut lexer = Lexer::new(input);
-        for token in expected {
+        for token in list {
             assert_eq!(lexer.next_token(), token);
         }
 
@@ -262,7 +263,7 @@ if (5 < 10) {
 10 != 9;
 ";
         #[rustfmt::skip]
-        let expected = [
+        let expects = [
             Let, Ident("five"), Assign, Int("5"), Semicolon,
             Let, Ident("ten"), Assign, Int("10"), Semicolon,
             Let, Ident("add"), Assign, Function, LParen, Ident("x"), Comma, Ident("y"), RParen,
@@ -279,23 +280,23 @@ if (5 < 10) {
         ];
 
         let mut lexer = Lexer::new(input);
-        for (i, want) in expected.into_iter().enumerate() {
-            assert_eq!(lexer.next_token(), want, "tests[{i}]");
+        for (idx, expected) in expects.into_iter().enumerate() {
+            assert_eq!(lexer.next_token(), expected, "tests[{idx}]");
         }
     }
 
     #[test]
     fn identifiers_may_contain_digits_but_not_start_with_one() {
         let mut lexer = Lexer::new("add2 x1 _y2 2x");
-        let want = [Ident("add2"), Ident("x1"), Ident("_y2"), Int("2"), Ident("x"), Eof];
-        for token in want {
+        let list = [Ident("add2"), Ident("x1"), Ident("_y2"), Int("2"), Ident("x"), Eof];
+        for token in list {
             assert_eq!(lexer.next_token(), token);
         }
     }
     #[test]
     fn keywords_are_still_recognised_and_longer_words_are_not() {
         let mut lexer = Lexer::new("let letter let1 fn fn2 macro macros");
-        let want = [
+        let list = [
             Let,
             Ident("letter"),
             Ident("let1"),
@@ -305,7 +306,7 @@ if (5 < 10) {
             Ident("macros"),
             Eof,
         ];
-        for token in want {
+        for token in list {
             assert_eq!(lexer.next_token(), token);
         }
     }
@@ -313,10 +314,10 @@ if (5 < 10) {
     #[test]
     fn quote_and_unquote_are_plain_identifiers() {
         let mut lexer = Lexer::new("quote(unquote(x))");
-        let want =
+        let list =
             [Ident("quote"), LParen, Ident("unquote"), LParen, Ident("x"), RParen, RParen, Eof];
-        for token in want {
-            assert_eq!(lexer.next_token(), token);
+        for expected in list {
+            assert_eq!(lexer.next_token(), expected);
         }
     }
 

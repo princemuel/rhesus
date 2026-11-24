@@ -3,36 +3,48 @@
 mod repl;
 mod user;
 
-use std::fs;
 use std::io::{BufWriter, Write as _, stdout};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::{fs, panic, thread};
 
 use lexopt::prelude::*;
+use rhesus_core::evaluator::DEFAULT_STACK_BUDGET;
 use rhesus_core::host::WriterHost;
 use rhesus_core::{Engine, Session};
 
 type Result<T = ()> = core::result::Result<T, Box<dyn core::error::Error>>;
 
+const INTERPRETER_STACK_SIZE: usize = 256 * 1024 * 1024;
+
 fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("Error: {err}");
-            ExitCode::FAILURE
-        }
+    let stack = thread::Builder::new()
+        .stack_size(INTERPRETER_STACK_SIZE)
+        .spawn(|| run(INTERPRETER_STACK_SIZE / 2).map_err(|err| err.to_string()));
+
+    let outcome = stack.map_or_else(
+        |_| run(DEFAULT_STACK_BUDGET).map_err(|err| err.to_string()),
+        |handle| handle.join().unwrap_or_else(|payload| panic::resume_unwind(payload)),
+    );
+
+    if let Err(err) = outcome {
+        eprintln!("Error: {err}");
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
-fn run() -> Result<()> {
+fn run(stack_budget: usize) -> Result<()> {
     match parse_args()? {
         Command::Help => write!(stdout().lock(), "{HELP}")?,
         Command::Version => writeln!(stdout().lock(), "rhesus {}", env!("CARGO_PKG_VERSION"))?,
-        Command::Repl { engine } => repl::start(engine)?,
+        Command::Repl { engine } => repl::start(engine, stack_budget)?,
         Command::Run { file, engine } => {
             let source = read_source(&file)?;
+
             let mut out = BufWriter::new(stdout().lock());
-            let mut session = Session::new(engine);
+            let mut session = Session::new(engine).with_stack_budget(stack_budget);
 
             let result = session.eval_line(&source, &mut WriterHost(&mut out));
 
@@ -48,6 +60,7 @@ fn run() -> Result<()> {
         }
         Command::Compile { file } => {
             let source = read_source(&file)?;
+
             let mut out = BufWriter::new(stdout().lock());
             // TODO: Wire up Compiler::compile(&program) and print bytecode
             // instructions
@@ -72,12 +85,12 @@ USAGE:
 
 SUBCOMMANDS:
     repl                Start the interactive REPL (default if no subcommand is given)
-    run <FILE>          Execute a Monkey script (bytecode VM unless --engine says otherwise)
+    run <FILE>          Execute a Monkey script (with the engine chosen by --engine)
     eval <FILE>         Execute a Monkey script using the tree-walking interpreter
     compile <FILE>      Compile a Monkey script and print bytecode disassembly
 
 OPTIONS:
-    -e, --engine <MODE> Engine for repl and run ('vm' or 'eval') [default: vm]
+    -e, --engine <MODE> Engine for repl and run ('eval' or 'vm') [default: eval]
     -h, --help          Print help information
     -V, --version       Print version information
 ";
@@ -94,7 +107,7 @@ fn parse_args() -> Result<Command> {
     let mut parser = lexopt::Parser::from_env();
     let mut subcommand: Option<String> = None;
     let mut file: Option<PathBuf> = None;
-    let mut engine = Engine::Vm;
+    let mut engine = Engine::Eval;
 
     while let Some(arg) = parser.next()? {
         match arg {

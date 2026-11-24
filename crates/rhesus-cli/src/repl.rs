@@ -2,15 +2,23 @@ use std::env;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 
+use rhesus_core::errors::Error;
 use rhesus_core::host::WriterHost;
+use rhesus_core::parser::is_incomplete;
 use rhesus_core::{Engine, Session};
-use rustyline::DefaultEditor;
+use rustyline::completion::Completer;
 use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::history::DefaultHistory;
+use rustyline::validate::{ValidationContext, ValidationResult, Validator};
+use rustyline::{Editor, Helper};
 
 use crate::user::username;
 
-pub(crate) fn start(engine: Engine) -> crate::Result<()> {
-    let mut rl = DefaultEditor::new()?;
+pub(crate) fn start(engine: Engine, stack_budget: usize) -> crate::Result<()> {
+    let mut rl = MonkeyEditor::new()?;
+    rl.set_helper(Some(MonkeyHelper));
     let history = history_path();
 
     // a missing history file on the first run is expected.
@@ -18,7 +26,7 @@ pub(crate) fn start(engine: Engine) -> crate::Result<()> {
         drop(rl.load_history(path));
     }
 
-    let result = run(&mut rl, engine);
+    let result = run(&mut rl, engine, stack_budget);
 
     // Runs on every exit path, including errors from `run`.
     if let Some(path) = &history
@@ -28,6 +36,28 @@ pub(crate) fn start(engine: Engine) -> crate::Result<()> {
     }
 
     result
+}
+
+struct MonkeyHelper;
+impl Completer for MonkeyHelper {
+    type Candidate = String;
+}
+impl Helper for MonkeyHelper {}
+impl Highlighter for MonkeyHelper {}
+impl Hinter for MonkeyHelper {
+    type Hint = String;
+}
+
+impl Validator for MonkeyHelper {
+    fn validate(&self, ctx: &mut ValidationContext<'_>) -> rustyline::Result<ValidationResult> {
+        Ok(judge(ctx.input()))
+    }
+}
+
+type MonkeyEditor = Editor<MonkeyHelper, DefaultHistory>;
+
+fn judge(input: &str) -> ValidationResult {
+    if is_incomplete(input) { ValidationResult::Incomplete } else { ValidationResult::Valid(None) }
 }
 
 const PROMPT: &str = "🐵 >> ";
@@ -66,8 +96,8 @@ enum Action<'a> {
     Quit,
 }
 
-fn run(rl: &mut DefaultEditor, engine: Engine) -> crate::Result<()> {
-    let mut session = Session::new(engine);
+fn run(rl: &mut MonkeyEditor, engine: Engine, stack_budget: usize) -> crate::Result<()> {
+    let mut session = Session::new(engine).with_stack_budget(stack_budget);
     let mut out = BufWriter::new(io::stdout().lock());
     let mut err_out = io::stderr().lock();
 
@@ -129,12 +159,26 @@ fn eval(
         Ok(None) => {}
         Err(err) => {
             out.flush()?; // flush program output first, before writing the error
-            writeln!(err_out, "{MONKEY_FACE}")?;
-            writeln!(err_out, "Woops! We ran into some monkey business here!")?;
-            writeln!(err_out, "  parser errors:\n\t {err}")?;
+            report(&err, err_out)?;
         }
     }
     Ok(out.flush()?)
+}
+
+fn report(err: &Error, err_out: &mut impl Write) -> io::Result<()> {
+    match err {
+        Error::Parse(messages) => {
+            writeln!(err_out, "{MONKEY_FACE}")?;
+            writeln!(err_out, "Woops! We ran into some monkey business here!")?;
+            writeln!(err_out, "  parser errors:")?;
+
+            for message in messages {
+                writeln!(err_out, "\t{message}")?;
+            }
+            Ok(())
+        }
+        Error::Eval(message) => writeln!(err_out, "ERROR: {message}"),
+    }
 }
 
 fn banner(out: &mut impl Write, engine: Engine) -> crate::Result<()> {
@@ -144,7 +188,7 @@ fn banner(out: &mut impl Write, engine: Engine) -> crate::Result<()> {
     };
     let name = username().unwrap_or_else(|| "there".to_owned()).to_lowercase();
 
-    writeln!(out, "Rhesus {} ({mode}) on {}", env!("CARGO_PKG_VERSION"), env::consts::OS)?;
+    writeln!(out, "Rhesus {} (in {mode} mode) on {}", env!("CARGO_PKG_VERSION"), env::consts::OS)?;
     writeln!(out, "Hello {name}! Type \"quit\" or press Ctrl+D to exit.")?;
     Ok(out.flush()?)
 }
@@ -154,7 +198,10 @@ fn history_path() -> Option<PathBuf> { env::home_dir().map(|home| home.join(".rh
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Input, State};
+    use rhesus_core::errors::Error;
+    use rustyline::validate::ValidationResult;
+
+    use super::{Action, Input, State, judge, report};
 
     #[test]
     fn scenario_first_ctrl_c_arms_second_quits() {
@@ -178,5 +225,32 @@ mod tests {
             assert_eq!(state.on(Input::Line("quit")).1, Action::Quit);
             assert_eq!(state.on(Input::Eof).1, Action::Quit);
         }
+    }
+
+    #[test]
+    fn enter_continues_the_line_while_a_block_is_open() {
+        for src in ["if (true) {", "let f = fn(x) {\n  x +", "[1,", "\"abc"] {
+            assert!(matches!(judge(src), ValidationResult::Incomplete), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn enter_submits_finished_and_hopeless_input() {
+        for src in ["1 + 1", "if (true) { 1 }", "let = 5", ".exit", "quit", "}"] {
+            assert!(matches!(judge(src), ValidationResult::Valid(None)), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn syntax_errors_get_the_monkey_and_runtime_errors_do_not() {
+        let mut out = Vec::new();
+        report(&Error::Parse(vec!["expected x".into(), "expected y".into()]), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("monkey business"));
+        assert!(text.contains("parser errors:\n\texpected x\n\texpected y\n"));
+
+        let mut out = Vec::new();
+        report(&Error::Eval("identifier not found: x".into()), &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "ERROR: identifier not found: x\n");
     }
 }

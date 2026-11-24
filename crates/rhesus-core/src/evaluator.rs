@@ -253,8 +253,8 @@ fn eval_index<'a>(lhs: &Object<'a>, index: &Object<'a>) -> Result<Object<'a>, Ev
 fn apply_function<'a>(callee: &Object<'a>, args: Vec<Object<'a>>, ctx: &mut Ctx<'_>) -> Flow<'a> {
     match callee {
         Object::Function(func) => {
-            let scope = bind_params(func, args)?;
-            Ok(run_body(func, &scope, ctx)?)
+            let scope = bind_params_to_env(func, args)?;
+            Ok(eval_func_or_macro_body(func, &scope, ctx)?)
         }
         Object::Builtin(builtin) => Ok(builtin(&args, ctx.host)?),
         other => Err(EvalError::NotAFunction(other.type_name()).into()),
@@ -319,7 +319,7 @@ pub(crate) fn is_ident(expr: &Expr<'_>, name: &str) -> bool {
 }
 
 /// A fresh scope, enclosed by the function's own, with each parameter bound.
-pub(crate) fn bind_params<'a>(
+pub(crate) fn bind_params_to_env<'a>(
     func: &Function<'a>,
     args: Vec<Object<'a>>,
 ) -> Result<Environment<'a>, EvalError<'a>> {
@@ -336,7 +336,7 @@ pub(crate) fn bind_params<'a>(
 }
 
 /// Runs a body in `scope`. A `return` ends the call here and goes no further.
-pub(crate) fn run_body<'a>(
+pub(crate) fn eval_func_or_macro_body<'a>(
     func: &Function<'a>,
     scope: &Environment<'a>,
     ctx: &mut Ctx<'_>,

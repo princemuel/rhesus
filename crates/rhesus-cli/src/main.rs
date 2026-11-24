@@ -13,17 +13,17 @@ use rhesus_core::evaluator::DEFAULT_STACK_BUDGET;
 use rhesus_core::host::WriterHost;
 use rhesus_core::{Engine, Session};
 
-type Result<T = ()> = core::result::Result<T, Box<dyn core::error::Error>>;
+type Result<T = ()> = core::result::Result<T, Box<dyn core::error::Error + Send + Sync>>;
 
 const INTERPRETER_STACK_SIZE: usize = 256 * 1024 * 1024;
 
 fn main() -> ExitCode {
     let stack = thread::Builder::new()
         .stack_size(INTERPRETER_STACK_SIZE)
-        .spawn(|| run(INTERPRETER_STACK_SIZE / 2).map_err(|err| err.to_string()));
+        .spawn(|| run(INTERPRETER_STACK_SIZE / 2));
 
     let outcome = stack.map_or_else(
-        |_| run(DEFAULT_STACK_BUDGET).map_err(|err| err.to_string()),
+        |_| run(DEFAULT_STACK_BUDGET),
         |handle| handle.join().unwrap_or_else(|payload| panic::resume_unwind(payload)),
     );
 

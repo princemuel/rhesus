@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use crate::ast::{Block, Expr, Stmt};
 use crate::environment::Environment;
 use crate::errors::EvalError;
-use crate::evaluator::{Ctx, DEFAULT_STACK_BUDGET, bind_params, run_body};
+use crate::evaluator::{Ctx, DEFAULT_STACK_BUDGET, bind_params_to_env, eval_func_or_macro_body};
 use crate::host::Host;
 use crate::object::{Function, Object};
 
@@ -92,10 +92,10 @@ fn expand_macro_call<'a>(
     };
 
     // Macro arguments are passed as unevaluated code, never as values.
-    let quoted = args.iter().map(|arg| Object::Quote(Rc::new(arg.clone()))).collect();
-    let scope = bind_params(&mac, quoted)?;
+    let quoted_args = args.iter().map(|arg| Object::Quote(Rc::new(arg.clone()))).collect();
+    let scope = bind_params_to_env(&mac, quoted_args)?;
 
-    match run_body(&mac, &scope, ctx)? {
+    match eval_func_or_macro_body(&mac, &scope, ctx)? {
         Object::Quote(node) => Ok(Rc::unwrap_or_clone(node)),
         other => Err(EvalError::MacroMustReturnQuote(other.type_name())),
     }

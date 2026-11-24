@@ -22,7 +22,7 @@ impl<'a> Environment<'a> {
         Self(Rc::new(RefCell::new(Scope { store: Map::new(), outer: Some(outer.clone()) })))
     }
 
-    /// Look in this scope, then walk outward.
+    /// Look inside this scope, then walk outward.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<Object<'a>> {
         let scope = self.0.borrow();
@@ -34,10 +34,11 @@ impl<'a> Environment<'a> {
     }
 }
 
-// This was intentionally not derived; since a function's env can contain that
-// same function, printing it would recurse forever.
+// The debug trait was intentionally not derived;
+// since a function's env can contain that same function, printing it would
+// recurse forever.
 impl fmt::Debug for Environment<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Env").finish_non_exhaustive()
+        f.debug_struct("Environment").finish_non_exhaustive()
     }
 }

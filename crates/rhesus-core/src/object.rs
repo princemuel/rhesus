@@ -3,9 +3,9 @@ use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::fmt;
+use core::{fmt, ptr};
 
-use crate::ast::Block;
+use crate::ast::{Block, Expr};
 use crate::environment::Environment;
 use crate::errors::EvalError;
 use crate::host::Host;
@@ -14,8 +14,7 @@ pub type Map<K, V> = BTreeMap<K, V>;
 
 pub type BuiltinResult<'a> = Result<Object<'a>, EvalError<'a>>;
 
-/// A native function. It gets the arguments and the REPL's output sink (for
-/// `puts`).
+/// A native function's type in Monkey
 pub type BuiltinFn<'a> = fn(&[Object<'a>], &mut dyn Host) -> BuiltinResult<'a>;
 
 /// Only these object values may be hash keys.
@@ -48,8 +47,8 @@ impl<'a> TryFrom<&Object<'a>> for HashKey<'a> {
 }
 
 pub struct Function<'a> {
-    pub params: Vec<&'a str>,
-    pub body: Block<'a>,
+    pub params: Rc<[&'a str]>,
+    pub body: Rc<Block<'a>>,
     pub env: Environment<'a>,
 }
 impl fmt::Debug for Function<'_> {
@@ -68,10 +67,14 @@ pub enum Object<'a> {
     Integer(i64),
     Boolean(bool),
     String(Cow<'a, str>),
-    Array(Vec<Self>),
-    Hash(Map<HashKey<'a>, Self>),
+    Array(Rc<[Self]>),
+    Hash(Rc<Map<HashKey<'a>, Self>>),
     Function(Rc<Function<'a>>),
     Builtin(BuiltinFn<'a>),
+    /// A piece of unevaluated code: the result of `quote(...)`
+    Quote(Rc<Expr<'a>>),
+    /// this is similar to a function but runs at expansion time instead
+    Macro(Rc<Function<'a>>),
 }
 
 impl Object<'_> {
@@ -86,10 +89,12 @@ impl Object<'_> {
             Self::Hash(_) => "HASH",
             Self::Function(_) => "FUNCTION",
             Self::Builtin(_) => "BUILTIN",
+            Self::Quote(_) => "QUOTE",
+            Self::Macro(_) => "MACRO",
         }
     }
 
-    /// only `false` and `null` are not truthy
+    /// all object values are truthy except `false` and `null`
     #[must_use]
     pub const fn is_truthy(&self) -> bool { !matches!(self, Self::Null | Self::Boolean(false)) }
 }
@@ -104,14 +109,16 @@ impl PartialEq for Object<'_> {
             (Self::String(a), Self::String(b)) => a == b,
             (Self::Array(a), Self::Array(b)) => a == b,
             (Self::Hash(a), Self::Hash(b)) => a == b,
-            (Self::Function(a), Self::Function(b)) => Rc::ptr_eq(a, b),
-            (Self::Builtin(a), Self::Builtin(b)) => core::ptr::fn_addr_eq(*a, *b),
+            (Self::Function(a), Self::Function(b)) | (Self::Macro(a), Self::Macro(b)) => {
+                Rc::ptr_eq(a, b)
+            }
+            (Self::Builtin(a), Self::Builtin(b)) => ptr::fn_addr_eq(*a, *b),
+            (Self::Quote(a), Self::Quote(b)) => a == b,
             _ => false,
         }
     }
 }
 
-/// The book's `Inspect()`.
 impl fmt::Display for Object<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -125,11 +132,9 @@ impl fmt::Display for Object<'_> {
                 let mut iter = items.iter();
                 if let Some(first) = iter.next() {
                     write!(f, "{first}")?;
-
-                    for item in iter {
-                        write!(f, ", {item}")?;
-                    }
+                    iter.try_for_each(|item| write!(f, ", {item}"))?;
                 }
+
                 f.write_str("]")
             }
             Self::Hash(map) => {
@@ -138,17 +143,19 @@ impl fmt::Display for Object<'_> {
                 let mut iter = map.iter();
                 if let Some((k, v)) = iter.next() {
                     write!(f, "{k}: {v}")?;
-
-                    for (k, v) in iter {
-                        write!(f, ", {k}: {v}")?;
-                    }
+                    iter.try_for_each(|(k, v)| write!(f, ", {k}: {v}"))?;
                 }
+
                 f.write_str("}")
             }
             Self::Function(func) => {
                 write!(f, "fn({}) {{\n{}\n}}", func.params.join(", "), func.body)
             }
             Self::Builtin(_) => f.write_str("builtin function"),
+            Self::Quote(node) => write!(f, "QUOTE({node})"),
+            Self::Macro(mac) => {
+                write!(f, "macro({}) {{\n{}\n}}", mac.params.join(", "), mac.body)
+            }
         }
     }
 }
@@ -182,7 +189,7 @@ impl<T: Into<Self>> From<Option<T>> for Object<'_> {
 }
 
 impl From<Vec<Self>> for Object<'_> {
-    fn from(value: Vec<Self>) -> Self { Self::Array(value) }
+    fn from(value: Vec<Self>) -> Self { Self::Array(value.into()) }
 }
 
 impl<'a> From<HashKey<'a>> for Object<'a> {
@@ -196,7 +203,7 @@ impl<'a> From<HashKey<'a>> for Object<'a> {
 }
 
 impl<'a> From<Map<HashKey<'a>, Self>> for Object<'a> {
-    fn from(value: Map<HashKey<'a>, Self>) -> Self { Self::Hash(value) }
+    fn from(value: Map<HashKey<'a>, Self>) -> Self { Self::Hash(Rc::new(value)) }
 }
 
 impl<'a> From<Function<'a>> for Object<'a> {
@@ -215,5 +222,144 @@ impl<'a> From<BuiltinFn<'a>> for Object<'a> {
 impl FromIterator<Self> for Object<'_> {
     fn from_iter<I: IntoIterator<Item = Self>>(iter: I) -> Self {
         Self::Array(iter.into_iter().collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::ToString as _;
+    use alloc::vec;
+
+    use super::*;
+
+    impl HashKey<'static> {
+        fn from_str_key(s: &'static str) -> Self { Self::String(Cow::Borrowed(s)) }
+    }
+
+    fn key(obj: &Object<'_>) -> HashKey<'static> {
+        match HashKey::try_from(obj).expect("hashable") {
+            HashKey::Integer(n) => HashKey::Integer(n),
+            HashKey::Boolean(b) => HashKey::Boolean(b),
+            HashKey::String(s) => HashKey::String(Cow::Owned(s.into_owned())),
+        }
+    }
+
+    // The book's TestStringHashKey.
+    #[test]
+    fn string_hash_key() {
+        let hello1 = Object::from("Hello World");
+        let hello2 = Object::from("Hello World");
+        let diff1 = Object::from("My name is johnny");
+        let diff2 = Object::from("My name is johnny");
+
+        assert_eq!(key(&hello1), key(&hello2), "same content, different keys");
+        assert_eq!(key(&diff1), key(&diff2), "same content, different keys");
+        assert_ne!(key(&hello1), key(&diff1), "different content, same keys");
+    }
+
+    #[test]
+    fn borrowed_and_owned_strings_make_the_same_key() {
+        let borrowed = Object::from("abc");
+        let owned = Object::from(String::from("abc"));
+        assert_eq!(key(&borrowed), key(&owned));
+    }
+
+    #[test]
+    fn integer_and_boolean_keys() {
+        assert_eq!(key(&Object::Integer(1)), key(&Object::Integer(1)));
+        assert_ne!(key(&Object::Integer(1)), key(&Object::Integer(2)));
+        assert_eq!(key(&Object::Boolean(true)), key(&Object::Boolean(true)));
+        assert_ne!(key(&Object::Boolean(true)), key(&Object::Boolean(false)));
+    }
+
+    #[test]
+    fn keys_of_different_types_never_collide() {
+        assert_ne!(key(&Object::Integer(1)), key(&Object::Boolean(true)));
+        assert_ne!(key(&Object::Integer(1)), key(&Object::from("1")));
+        assert_ne!(key(&Object::Boolean(true)), key(&Object::from("true")));
+    }
+
+    #[test]
+    fn only_integers_booleans_and_strings_are_hashable() {
+        for (obj, ty) in [
+            (Object::Null, "NULL"),
+            (Object::from(vec![]), "ARRAY"),
+            (Object::from(Map::new()), "HASH"),
+        ] {
+            assert_eq!(HashKey::try_from(&obj), Err(EvalError::UnusableAsHashKey(ty)));
+        }
+    }
+
+    #[test]
+    fn hash_keys_round_trip_into_objects() {
+        for obj in [Object::Integer(7), Object::Boolean(false), Object::from("k")] {
+            assert_eq!(Object::from(key(&obj)), obj);
+        }
+    }
+
+    #[test]
+    fn cloning_arrays_and_hashes_shares_the_elements() {
+        let array = Object::from(vec![Object::Integer(1), Object::Integer(2)]);
+        let (Object::Array(a), Object::Array(b)) = (&array, &array.clone()) else {
+            panic!("expected arrays");
+        };
+        assert!(Rc::ptr_eq(a, b));
+
+        let hash = Object::from(Map::from([(HashKey::Integer(1), Object::Null)]));
+        let (Object::Hash(a), Object::Hash(b)) = (&hash, &hash.clone()) else {
+            panic!("expected hashes");
+        };
+        assert!(Rc::ptr_eq(a, b));
+    }
+
+    #[test]
+    fn only_null_and_false_are_falsy() {
+        let falsy = [Object::Null, Object::Boolean(false)];
+        let truthy = [
+            Object::Boolean(true),
+            Object::Integer(0),
+            Object::from(""),
+            Object::from(vec![]),
+            Object::from(Map::new()),
+        ];
+        assert!(falsy.iter().all(|o| !o.is_truthy()));
+        assert!(truthy.iter().all(Object::is_truthy));
+    }
+
+    #[test]
+    fn inspect_output() {
+        let map = Map::from([
+            (HashKey::from_str_key("a"), Object::Integer(1)),
+            (HashKey::Integer(2), Object::Null),
+        ]);
+
+        let tests = [
+            (Object::Null, "null"),
+            (Object::Integer(-3), "-3"),
+            (Object::Boolean(true), "true"),
+            (Object::from("hi"), "hi"),
+            (Object::from(vec![]), "[]"),
+            (Object::from(vec![Object::Integer(1), Object::from("x")]), "[1, x]"),
+            (Object::from(Map::new()), "{}"),
+            (Object::from(map), "{2: null, a: 1}"),
+        ];
+        for (obj, want) in tests {
+            assert_eq!(obj.to_string(), want);
+        }
+    }
+
+    #[test]
+    fn type_names_match_their_respective_objects() {
+        let tests = [
+            (Object::Null, "NULL"),
+            (Object::Integer(1), "INTEGER"),
+            (Object::Boolean(true), "BOOLEAN"),
+            (Object::from("s"), "STRING"),
+            (Object::from(vec![]), "ARRAY"),
+            (Object::from(Map::new()), "HASH"),
+        ];
+        for (obj, want) in tests {
+            assert_eq!(obj.type_name(), want);
+        }
     }
 }

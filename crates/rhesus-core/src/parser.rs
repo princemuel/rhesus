@@ -1,20 +1,32 @@
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::iter::Peekable;
 
 use crate::ast::{Block, Expr, Infix, Precedence, PrefixOp, Stmt, infix_rule};
-use crate::errors::{ParseError, ParseResult};
+use crate::errors::ParseError;
 use crate::lexer::Lexer;
 use crate::token::Token;
+
+/// How deep the syntax tree may get.
+pub const MAX_SYNTAX_TREE_NESTING: usize = 256;
+
+#[must_use]
+pub fn is_incomplete(source: &str) -> bool {
+    Parser::new(Lexer::new(source))
+        .parse_program()
+        .is_err_and(|errors| errors.iter().all(ParseError::is_incomplete))
+}
 
 #[derive(Debug)]
 pub struct Parser<'a> {
     tokens: Peekable<Lexer<'a>>,
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
     #[must_use]
-    pub fn new(lexer: Lexer<'a>) -> Self { Self { tokens: lexer.peekable() } }
+    pub fn new(lexer: Lexer<'a>) -> Self { Self { tokens: lexer.peekable(), depth: 0 } }
 
     /// Parse everything, collecting every error instead of stopping at the
     /// first.
@@ -28,13 +40,15 @@ impl<'a> Parser<'a> {
         let mut errors = Vec::new();
 
         while self.tokens.peek().is_some() {
+            let start = self.tokens.clone();
+
             match self.parse_stmt() {
                 Ok(stmt) => stmts.push(stmt),
-                Err(err) => {
-                    if !err.ended_at_semicolon() {
-                        self.skip_past_semicolon();
-                    }
-                    errors.push(err);
+                Err(error) => {
+                    errors.push(error);
+
+                    self.tokens = start;
+                    self.skip_statement();
                 }
             }
         }
@@ -42,7 +56,7 @@ impl<'a> Parser<'a> {
         if errors.is_empty() { Ok(Block(stmts)) } else { Err(errors) }
     }
 
-    fn parse_block(&mut self) -> ParseResult<'a, Block<'a>> {
+    fn parse_block(&mut self) -> Result<Block<'a>, ParseError<'a>> {
         self.expect(&Token::LBrace, "'{'")?;
 
         let mut stmts = Vec::new();
@@ -57,7 +71,7 @@ impl<'a> Parser<'a> {
         Ok(Block(stmts))
     }
 
-    fn parse_stmt(&mut self) -> ParseResult<'a, Stmt<'a>> {
+    fn parse_stmt(&mut self) -> Result<Stmt<'a>, ParseError<'a>> {
         let stmt = match self.tokens.peek() {
             Some(Token::Let) => self.parse_let()?,
             Some(Token::Return) => self.parse_return()?,
@@ -67,7 +81,7 @@ impl<'a> Parser<'a> {
         Ok(stmt)
     }
 
-    fn parse_let(&mut self) -> ParseResult<'a, Stmt<'a>> {
+    fn parse_let(&mut self) -> Result<Stmt<'a>, ParseError<'a>> {
         self.advance(); // `let`
         let name = self.expect_ident()?;
         self.expect(&Token::Assign, "'='")?;
@@ -75,12 +89,28 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Let { name, value })
     }
 
-    fn parse_return(&mut self) -> ParseResult<'a, Stmt<'a>> {
+    fn parse_return(&mut self) -> Result<Stmt<'a>, ParseError<'a>> {
         self.advance(); // `return`
         Ok(Stmt::Return(self.parse_expr(Precedence::Lowest)?))
     }
 
-    fn parse_expr(&mut self, min: Precedence) -> ParseResult<'a, Expr<'a>> {
+    fn parse_expr(&mut self, min: Precedence) -> Result<Expr<'a>, ParseError<'a>> {
+        let depth = self.depth;
+        let result = self.parse_expr_at_depth(min);
+        self.depth = depth;
+        result
+    }
+
+    const fn deepen(&mut self) -> Result<(), ParseError<'a>> {
+        if self.depth >= MAX_SYNTAX_TREE_NESTING {
+            return Err(ParseError::NestingTooDeep);
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn parse_expr_at_depth(&mut self, min: Precedence) -> Result<Expr<'a>, ParseError<'a>> {
+        self.deepen()?;
         let mut left = self.parse_prefix()?;
 
         while let Some((prec, rule)) = self.tokens.peek().and_then(infix_rule) {
@@ -88,6 +118,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             self.advance(); // the operator or `(`
+            self.deepen()?; // `left` is about to become a child of a new node
 
             left = match rule {
                 Infix::Binary(op) => {
@@ -107,7 +138,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    fn parse_prefix(&mut self) -> ParseResult<'a, Expr<'a>> {
+    fn parse_prefix(&mut self) -> Result<Expr<'a>, ParseError<'a>> {
         match self.next("expr")? {
             Token::Ident(name) => Ok(Expr::Ident(name)),
             Token::Int(val) => {
@@ -124,7 +155,14 @@ impl<'a> Parser<'a> {
                 Ok(inner)
             }
             Token::If => self.parse_if(),
-            Token::Function => self.parse_function(),
+            Token::Function => {
+                let (params, body) = self.parse_params_and_body()?;
+                Ok(Expr::Function { params, body })
+            }
+            Token::Macro => {
+                let (params, body) = self.parse_params_and_body()?;
+                Ok(Expr::Macro { params, body })
+            }
             Token::LBracket => Ok(Expr::Array(
                 self.parse_list(&Token::RBracket, |p| p.parse_expr(Precedence::Lowest))?,
             )),
@@ -133,35 +171,35 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_unary(&mut self, op: PrefixOp) -> ParseResult<'a, Expr<'a>> {
+    fn parse_unary(&mut self, op: PrefixOp) -> Result<Expr<'a>, ParseError<'a>> {
         let right = Box::new(self.parse_expr(Precedence::Prefix)?);
         Ok(Expr::Prefix { op, rhs: right })
     }
 
-    fn parse_if(&mut self) -> ParseResult<'a, Expr<'a>> {
+    fn parse_if(&mut self) -> Result<Expr<'a>, ParseError<'a>> {
         self.expect(&Token::LParen, "'('")?;
 
         let condition = Box::new(self.parse_expr(Precedence::Lowest)?);
         self.expect(&Token::RParen, "')'")?;
 
         let consequence = self.parse_block()?;
-        let alternative = self.eat(&Token::Else).then(|| self.parse_block()).transpose()?;
+        let alternative = if self.eat(&Token::Else) { Some(self.parse_block()?) } else { None };
         Ok(Expr::If { condition, consequence, alternative })
     }
 
-    fn parse_function(&mut self) -> ParseResult<'a, Expr<'a>> {
+    fn parse_params_and_body(&mut self) -> Result<(Rc<[&'a str]>, Rc<Block<'a>>), ParseError<'a>> {
         self.expect(&Token::LParen, "'('")?;
         let params = self.parse_list(&Token::RParen, Self::expect_ident)?;
         let body = self.parse_block()?;
-        Ok(Expr::Function { params, body })
+        Ok((params.into(), Rc::new(body)))
     }
 
     /// `item, item, ... close`, with the opening delimiter already consumed.
     fn parse_list<T>(
         &mut self,
         close: &Token<'a>,
-        mut item: impl FnMut(&mut Self) -> ParseResult<'a, T>,
-    ) -> ParseResult<'a, Vec<T>> {
+        mut item: impl FnMut(&mut Self) -> Result<T, ParseError<'a>>,
+    ) -> Result<Vec<T>, ParseError<'a>> {
         let mut items = Vec::new();
 
         if self.eat(close) {
@@ -179,7 +217,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_hash(&mut self) -> ParseResult<'a, Expr<'a>> {
+    fn parse_hash(&mut self) -> Result<Expr<'a>, ParseError<'a>> {
         let pairs = self.parse_list(&Token::RBrace, |p| {
             let key = p.parse_expr(Precedence::Lowest)?;
             p.expect(&Token::Colon, "':'")?;
@@ -195,29 +233,35 @@ impl<'a> Parser<'a> {
     /// Consume the next token if it equals `expected`.
     fn eat(&mut self, expected: &Token<'a>) -> bool { self.tokens.next_if_eq(expected).is_some() }
 
-    fn next(&mut self, expected: &'static str) -> ParseResult<'a, Token<'a>> {
+    fn next(&mut self, expected: &'static str) -> Result<Token<'a>, ParseError<'a>> {
         self.tokens.next().ok_or(ParseError::UnexpectedEof { expected })
     }
 
-    fn expect(&mut self, expected: &Token<'a>, what: &'static str) -> ParseResult<'a, ()> {
-        let found = self.next(what)?;
-        let true = found == *expected else {
-            return Err(ParseError::UnexpectedToken { expected: what, got: found });
-        };
-
-        Ok(())
+    fn expect(&mut self, expected: &Token<'a>, what: &'static str) -> Result<(), ParseError<'a>> {
+        match self.next(what)? {
+            found if found == *expected => Ok(()),
+            found => Err(ParseError::UnexpectedToken { expected: what, got: found }),
+        }
     }
 
-    fn expect_ident(&mut self) -> ParseResult<'a, &'a str> {
+    fn expect_ident(&mut self) -> Result<&'a str, ParseError<'a>> {
         match self.next("identifier")? {
             Token::Ident(name) => Ok(name),
             found => Err(ParseError::UnexpectedToken { expected: "identifier", got: found }),
         }
     }
 
-    /// Error recovery: drop tokens through the next `;`.
-    fn skip_past_semicolon(&mut self) {
-        let _ = self.tokens.by_ref().any(|token| token == Token::Semicolon);
+    /// Error recovery: drop everything through the bad statement's own `;`
+    fn skip_statement(&mut self) {
+        let mut open = 0usize;
+        for token in self.tokens.by_ref() {
+            match token {
+                Token::LParen | Token::LBracket | Token::LBrace => open += 1,
+                Token::RParen | Token::RBracket | Token::RBrace => open = open.saturating_sub(1),
+                Token::Semicolon if open == 0 => return,
+                _ => {}
+            }
+        }
     }
 }
 
@@ -230,11 +274,12 @@ mod tests {
     use super::*;
     use crate::ast::{InfixOp, Program};
 
-    fn s_expr(src: &str) -> String { Program(stmts(src)).to_string() }
+    fn sexpr(src: &str) -> String { Program(stmts(src)).to_string() }
 
     fn single_expr(src: &str) -> Expr<'_> {
         let mut parsed = stmts(src);
         assert_eq!(parsed.len(), 1, "program should contain 1 statement: {parsed:?}");
+
         match parsed.remove(0) {
             Stmt::Expr(expr) => expr,
             other => panic!("expected expression statement, got {other:?}"),
@@ -250,13 +295,13 @@ mod tests {
         Parser::new(Lexer::new(src)).parse_program().expect_err("expected parse errors")
     }
 
-    fn string_lit(s: &str) -> Expr<'_> { Expr::String(Cow::Borrowed(s)) }
-
     fn int(value: i64) -> Expr<'static> { Expr::Int(value) }
 
-    fn ident(name: &str) -> Expr<'_> { Expr::Ident(name) }
-
     fn boolean(value: bool) -> Expr<'static> { Expr::Boolean(value) }
+
+    fn string(s: &str) -> Expr<'_> { Expr::String(Cow::Borrowed(s)) }
+
+    fn ident(name: &str) -> Expr<'_> { Expr::Ident(name) }
 
     fn prefix(op: PrefixOp, right: Expr<'_>) -> Expr<'_> {
         Expr::Prefix { op, rhs: Box::new(right) }
@@ -268,12 +313,12 @@ mod tests {
 
     #[test]
     fn product_binds_tighter_than_sum() {
-        assert_eq!(s_expr("1 + 2 * 3"), "(+ 1 (* 2 3))");
+        assert_eq!(sexpr("1 + 2 * 3"), "(+ 1 (* 2 3))");
     }
 
     #[test]
     fn prefix_binds_tighter_than_product() {
-        assert_eq!(s_expr("-a * b"), "(* (- a) b)");
+        assert_eq!(sexpr("-a * b"), "(* (- a) b)");
     }
 
     #[test]
@@ -284,11 +329,11 @@ mod tests {
 
     #[test]
     fn operator_precedence_formatting() {
-        assert_eq!(s_expr("-a * b + c == d / e"), "(== (+ (* (- a) b) c) (/ d e))");
+        assert_eq!(sexpr("-a * b + c == d / e"), "(== (+ (* (- a) b) c) (/ d e))");
     }
 
     #[test]
-    fn let_statements() {
+    fn parsing_let_statements() {
         let tests = [
             ("let x = 5;", "x", int(5)),
             ("let y = true;", "y", boolean(true)),
@@ -300,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn return_statements() {
+    fn parsing_return_statements() {
         let tests = [
             ("return 5;", int(5)),
             ("return true;", boolean(true)),
@@ -374,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn operator_precedence_parsing() {
+    fn parsing_operator_precedence() {
         let tests = [
             ("-a * b", "(* (- a) b)"),
             ("!-a", "(! (- a))"),
@@ -411,12 +456,12 @@ mod tests {
             ),
         ];
         for (input, want) in tests {
-            assert_eq!(s_expr(input), want, "input: {input}");
+            assert_eq!(sexpr(input), want, "input: {input}");
         }
     }
 
     #[test]
-    fn if_expression() {
+    fn parsing_if_expressions() {
         assert_eq!(single_expr("if (x < y) { x }"), Expr::If {
             condition: Box::new(infix(ident("x"), InfixOp::Lt, ident("y"))),
             consequence: Block(vec![Stmt::Expr(ident("x"))]),
@@ -425,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn if_else_expression() {
+    fn parsing_if_else_expressions() {
         assert_eq!(single_expr("if (x < y) { x } else { y }"), Expr::If {
             condition: Box::new(infix(ident("x"), InfixOp::Lt, ident("y"))),
             consequence: Block(vec![Stmt::Expr(ident("x"))]),
@@ -434,27 +479,27 @@ mod tests {
     }
 
     #[test]
-    fn function_literal_parsing() {
+    fn parsing_function_literals() {
         assert_eq!(single_expr("fn(x, y) { x + y; }"), Expr::Function {
-            params: vec!["x", "y"],
-            body: Block(vec![Stmt::Expr(infix(ident("x"), InfixOp::Plus, ident("y")))]),
+            params: Rc::from(["x", "y"]),
+            body: Rc::new(Block(vec![Stmt::Expr(infix(ident("x"), InfixOp::Plus, ident("y")))])),
         });
     }
 
     #[test]
-    fn function_parameter_parsing() {
+    fn parsing_function_parameter() {
         let tests: [(&str, &[&str]); 3] =
             [("fn() {};", &[]), ("fn(x) {};", &["x"]), ("fn(x, y, z) {};", &["x", "y", "z"])];
         for (input, expected) in tests {
             let Expr::Function { params, .. } = single_expr(input) else {
                 panic!("expected function literal for {input}");
             };
-            assert_eq!(params, expected, "input: {input}");
+            assert_eq!(&*params, expected, "input: {input}");
         }
     }
 
     #[test]
-    fn call_expression_parsing() {
+    fn parsing_call_expressions() {
         assert_eq!(single_expr("add(1, 2 * 3, 4 + 5);"), Expr::Call {
             function: Box::new(ident("add")),
             args: vec![
@@ -466,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn call_expression_parameter_parsing() {
+    fn parsing_call_expression_parameters() {
         let tests: [(&str, &str, &[&str]); 3] = [
             ("add();", "add", &[]),
             ("add(1);", "add", &["1"]),
@@ -484,30 +529,30 @@ mod tests {
     }
 
     #[test]
-    fn string_literal_expression() {
-        assert_eq!(single_expr(r#""hello world";"#), string_lit("hello world"));
+    fn parsing_string_literals() {
+        assert_eq!(single_expr(r#""hello world";"#), string("hello world"));
     }
 
     #[test]
-    fn array_literals_parsing() {
+    fn parsing_array_literals() {
         assert_eq!(single_expr("[]"), Expr::Array(vec![]));
-        assert_eq!(s_expr("[1, 2 * 2, 3 + 3]"), "(array 1 (* 2 2) (+ 3 3))");
+        assert_eq!(sexpr("[1, 2 * 2, 3 + 3]"), "(array 1 (* 2 2) (+ 3 3))");
     }
 
     #[test]
-    fn index_expressions_parsing() {
-        assert_eq!(s_expr("myArray[1 + 1]"), "(index myArray (+ 1 1))");
+    fn parsing_index_expressions() {
+        assert_eq!(sexpr("myArray[1 + 1]"), "(index myArray (+ 1 1))");
     }
 
     #[test]
-    fn hash_literals_parsing() {
+    fn parsing_hash_literals() {
         assert_eq!(single_expr("{}"), Expr::Hash(vec![]));
         assert_eq!(
             single_expr(r#"{"one": 1, "two": 2, "three": 3}"#),
             Expr::Hash(vec![
-                (string_lit("one"), int(1)),
-                (string_lit("two"), int(2)),
-                (string_lit("three"), int(3)),
+                (string("one"), int(1)),
+                (string("two"), int(2)),
+                (string("three"), int(3)),
             ])
         );
         assert_eq!(
@@ -519,7 +564,7 @@ mod tests {
             Expr::Hash(vec![(int(1), int(1)), (int(2), int(2)), (int(3), int(3))])
         );
         assert_eq!(
-            s_expr(r#"{"one": 0 + 1, "two": 10 - 8, "three": 15 / 5}"#),
+            sexpr(r#"{"one": 0 + 1, "two": 10 - 8, "three": 15 / 5}"#),
             r#"(hash ("one" (+ 0 1)) ("two" (- 10 8)) ("three" (/ 15 5)))"#
         );
     }
@@ -534,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn integer_literal_out_of_range() {
+    fn integer_literal_out_of_range_errors() {
         assert_eq!(errors("99999999999999999999;"), [ParseError::InvalidInt(
             "99999999999999999999"
         )]);
@@ -546,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_block_is_not_a_statement() {
+    fn bare_block_is_not_a_statement_errors() {
         // `{` in expression position is a hash literal, so a block fails at the
         // missing `:`.
         let errs = errors("{ x }");
@@ -557,5 +602,145 @@ mod tests {
     fn unterminated_block_is_an_error() {
         let errs = errors("if (x) { x");
         assert_eq!(errs, [ParseError::UnexpectedEof { expected: "'}'" }]);
+    }
+    #[test]
+    fn parsing_macro_literals() {
+        assert_eq!(single_expr("macro(x, y) { x + y; }"), Expr::Macro {
+            params: Rc::from(["x", "y"]),
+            body: Rc::new(Block(vec![Stmt::Expr(infix(ident("x"), InfixOp::Plus, ident("y")))])),
+        });
+    }
+
+    #[test]
+    fn parsing_macro_parameters() {
+        let tests: [(&str, &[&str]); 3] = [
+            ("macro() {};", &[]),
+            ("macro(x) {};", &["x"]),
+            ("macro(x, y, z) {};", &["x", "y", "z"]),
+        ];
+        for (input, expected) in tests {
+            let Expr::Macro { params, .. } = single_expr(input) else {
+                panic!("expected macro literal for {input}");
+            };
+            assert_eq!(&*params, expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn parsing_macro_definition_statements() {
+        assert_eq!(sexpr("let m = macro(x) { x };"), "(let m (macro (x) (do x)))");
+    }
+
+    #[test]
+    fn macro_errors() {
+        assert!(matches!(errors("macro x { }")[0], ParseError::UnexpectedToken {
+            expected: "'('",
+            ..
+        }));
+        assert!(matches!(errors("macro(1) { }")[0], ParseError::UnexpectedToken {
+            expected: "identifier",
+            ..
+        }));
+    }
+
+    #[test]
+    fn blocks_print_balanced() {
+        assert_eq!(sexpr("if (x) { 1; 2 } else { }"), "(if x (do 1 2) (do))");
+        assert_eq!(sexpr("fn(a) { return a; }"), "(fn (a) (do (return a)))");
+    }
+
+    #[test]
+    fn an_error_inside_a_block_is_reported_once() {
+        // Recovery must skip the whole bad statement, not stop at the `;`
+        // inside its block (which would leave `2 }` to produce a second, bogus
+        // error).
+        let errs = errors("fn() { let = 1; 2 }; 3");
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(matches!(errs[0], ParseError::UnexpectedToken { expected: "identifier", .. }));
+    }
+
+    #[test]
+    fn parsing_resumes_after_a_bad_block_statement() {
+        let errs = errors("fn() { let = 1; 2 }; let y 6; if (a) { let = 3 }; 7");
+        assert_eq!(errs.len(), 3, "{errs:?}");
+    }
+
+    #[test]
+    fn stray_closing_brace_is_one_error() {
+        let errs = errors("} let a = 1; let b = 2;");
+        assert_eq!(errs.len(), 1, "{errs:?}");
+    }
+
+    #[test]
+    fn nesting_is_capped_instead_of_overflowing_the_stack() {
+        let nested = |n: usize| alloc::format!("{}1{}", "(".repeat(n), ")".repeat(n));
+
+        assert_eq!(single_expr(&nested(MAX_SYNTAX_TREE_NESTING - 1)), int(1));
+        assert_eq!(errors(&nested(MAX_SYNTAX_TREE_NESTING)), [ParseError::NestingTooDeep]);
+
+        assert_eq!(errors(&"!".repeat(MAX_SYNTAX_TREE_NESTING + 1)), [ParseError::NestingTooDeep]);
+        assert_eq!(errors(&"[".repeat(MAX_SYNTAX_TREE_NESTING + 1)), [ParseError::NestingTooDeep]);
+        assert_eq!(errors(&"fn(){".repeat(MAX_SYNTAX_TREE_NESTING + 1)), [
+            ParseError::NestingTooDeep
+        ]);
+    }
+
+    #[test]
+    fn long_operator_chains_are_capped() {
+        let chain = |operators: usize| alloc::format!("1{}", " + 1".repeat(operators));
+
+        assert!(matches!(single_expr(&chain(MAX_SYNTAX_TREE_NESTING - 2)), Expr::Infix { .. }));
+        assert_eq!(errors(&chain(MAX_SYNTAX_TREE_NESTING - 1)), [ParseError::NestingTooDeep]);
+
+        let calls = |n: usize| alloc::format!("f{}", "()".repeat(n));
+        assert!(matches!(single_expr(&calls(MAX_SYNTAX_TREE_NESTING - 1)), Expr::Call { .. }));
+        assert_eq!(errors(&calls(MAX_SYNTAX_TREE_NESTING)), [ParseError::NestingTooDeep]);
+    }
+
+    #[test]
+    fn parser_works_again_after_hitting_the_nesting_cap() {
+        let src = alloc::format!(
+            "{}1{}; 2 + 3",
+            "(".repeat(MAX_SYNTAX_TREE_NESTING),
+            ")".repeat(MAX_SYNTAX_TREE_NESTING)
+        );
+        assert_eq!(errors(&src), [ParseError::NestingTooDeep]);
+        assert_eq!(sexpr("let a = ((1)); a"), "(let a 1) a");
+    }
+
+    #[test]
+    fn incomplete_input_is_detected() {
+        for src in [
+            "if (x) {",
+            "if (x) { 1 } else {",
+            "let a = [1, 2",
+            "foo(",
+            "fn(a, b) { a +",
+            "let m = {\"a\": 1,",
+            "let s = \"unterminated",
+            "let s = \"dangling escape\\",
+            "1 +",
+            "let",
+        ] {
+            assert!(is_incomplete(src), "should be incomplete: {src:?}");
+        }
+    }
+
+    #[test]
+    fn complete_or_hopeless_input_is_not_incomplete() {
+        for src in [
+            "",
+            "1 + 2",
+            "if (x) { 1 }",
+            "let = 5",
+            "let x 5;",
+            "foo(1 2",
+            "if (x { 1 }",
+            "}",
+            "let a = 1; let = 2; if (x) {",
+            ".exit",
+        ] {
+            assert!(!is_incomplete(src), "should not be incomplete: {src:?}");
+        }
     }
 }

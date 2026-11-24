@@ -1,22 +1,46 @@
-use core::error::Error;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::error::Error as StdError;
 use core::fmt;
 
 use crate::ast::{InfixOp, PrefixOp};
 use crate::token::Token;
 
-pub type ParseResult<'a, T> = Result<T, ParseError<'a>>;
-pub type EvalResult<'a, T> = Result<T, EvalError<'a>>;
+#[expect(clippy::error_impl_error)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// One message per syntax error.
+    Parse(Vec<String>),
+    /// A runtime error (or a macro-expansion error).
+    Eval(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parse(msg) => f.write_str(&msg.join("\n  ")),
+            Self::Eval(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl StdError for Error {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParseError<'a> {
     UnexpectedToken { expected: &'static str, got: Token<'a> },
     UnexpectedEof { expected: &'static str },
     InvalidInt(&'a str),
+    NestingTooDeep,
 }
 impl ParseError<'_> {
     #[must_use]
-    pub const fn ended_at_semicolon(&self) -> bool {
-        matches!(self, Self::UnexpectedToken { got: Token::Semicolon, .. })
+    pub const fn is_incomplete(&self) -> bool {
+        matches!(
+            self,
+            Self::UnexpectedEof { .. }
+                | Self::UnexpectedToken { got: Token::Illegal('"' | '\\'), .. }
+        )
     }
 }
 impl fmt::Display for ParseError<'_> {
@@ -29,10 +53,13 @@ impl fmt::Display for ParseError<'_> {
                 write!(f, "expected {expected}, got end of input")
             }
             Self::InvalidInt(raw) => write!(f, "integer literal out of range: {raw}"),
+            Self::NestingTooDeep => {
+                f.write_str("expression too deeply nested (or too many chained operators)")
+            }
         }
     }
 }
-impl Error for ParseError<'_> {}
+impl StdError for ParseError<'_> {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EvalError<'a> {
@@ -75,6 +102,7 @@ pub enum EvalError<'a> {
     MacroMustReturnQuote(&'static str),
     InvalidDigit,
     IntegerOverflow,
+    StackOverflow,
     Host(HostError),
 }
 
@@ -107,13 +135,14 @@ impl fmt::Display for EvalError<'_> {
             Self::MacroMustReturnQuote(got) => write!(f, "macro must return a QUOTE, got {got}"),
             Self::DivisionByZero => f.write_str("division by zero"),
             Self::IntegerOverflow => f.write_str("integer overflow"),
+            Self::StackOverflow => f.write_str("stack overflow: recursion too deep"),
             Self::InvalidDigit => f.write_str("invalid digit"),
             Self::Host(err) => write!(f, "{err}"),
         }
     }
 }
 
-impl Error for EvalError<'_> {}
+impl StdError for EvalError<'_> {}
 
 impl From<HostError> for EvalError<'_> {
     fn from(err: HostError) -> Self { Self::Host(err) }
@@ -134,4 +163,4 @@ impl fmt::Display for HostError {
         }
     }
 }
-impl Error for HostError {}
+impl StdError for HostError {}

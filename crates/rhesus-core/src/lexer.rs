@@ -80,9 +80,9 @@ impl<'a> Lexer<'a> {
     fn consume_while(&mut self, predicate: impl Fn(char) -> bool) -> &'a str {
         let rest = self.rest;
         let end = rest.find(|ch: char| !predicate(ch)).unwrap_or(rest.len());
-        let (token, tail) = rest.split_at(end);
+        let (head, tail) = rest.split_at(end);
         self.rest = tail;
-        token
+        head
     }
 
     /// Called after the opening `"` has been consumed.

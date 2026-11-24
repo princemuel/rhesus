@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG RUST_VERSION=1.96
+ARG RUST_VERSION=1.100
 
 FROM rust:${RUST_VERSION}-bookworm AS chef
 RUN cargo install cargo-chef --locked
@@ -15,8 +15,8 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
 COPY . .
-RUN cargo build --locked --release --bin kcc
+RUN cargo build --locked --release --bin rhesus
 
 FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
-COPY --from=builder /app/target/release/kcc /bin/kcc
-ENTRYPOINT ["/bin/kcc"]
+COPY --from=builder /app/target/release/rhesus /bin/rhesus
+ENTRYPOINT ["/bin/rhesus"]

@@ -1,14 +1,14 @@
 use alloc::string::ToString as _;
+use alloc::vec::Vec;
 
 use crate::errors::EvalError;
 use crate::host::Host;
-use crate::object::{BuiltinFn, BuiltinResult, Object};
+use crate::object::{BuiltinResult, Object};
 
-/// Find a builtin by name. The evaluator checks the environment first, then
-/// this.
+/// find a builtin function by name
 #[must_use]
 pub fn lookup<'a>(name: &str) -> Option<Object<'a>> {
-    let b = |f: BuiltinFn<'a>| Some(Object::Builtin(f));
+    let b = |f| Some(Object::Builtin(f));
     match name {
         "len" => b(len),
         "first" => b(first),
@@ -41,6 +41,7 @@ fn array_arg<'x, 'a>(
     }
 }
 
+/// a string's length is its size in bytes. `len("héllo")` is 6.
 fn len<'a>(args: &[Object<'a>], _host: &mut dyn Host) -> BuiltinResult<'a> {
     let [arg] = expect_args::<1>(args)?;
     let n = match arg {
@@ -65,14 +66,17 @@ fn last<'a>(args: &[Object<'a>], _host: &mut dyn Host) -> BuiltinResult<'a> {
 
 fn rest<'a>(args: &[Object<'a>], _host: &mut dyn Host) -> BuiltinResult<'a> {
     let [arg] = expect_args::<1>(args)?;
-    Ok(array_arg("rest", arg)?.split_first().map(|(_, tail)| Object::Array(tail.to_vec())).into())
+    Ok(array_arg("rest", arg)?.split_first().map(|(_, tail)| Object::Array(tail.into())).into())
 }
 
 fn push<'a>(args: &[Object<'a>], _host: &mut dyn Host) -> BuiltinResult<'a> {
     let [array, value] = expect_args::<2>(args)?;
-    let mut items = array_arg("push", array)?.to_vec();
+    let old = array_arg("push", array)?;
+
+    let mut items = Vec::with_capacity(old.len() + 1);
+    items.extend_from_slice(old);
     items.push(value.clone());
-    Ok(Object::Array(items))
+    Ok(items.into())
 }
 
 fn puts<'a>(args: &[Object<'a>], host: &mut dyn Host) -> BuiltinResult<'a> {

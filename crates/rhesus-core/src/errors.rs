@@ -164,3 +164,34 @@ impl fmt::Display for HostError {
     }
 }
 impl StdError for HostError {}
+
+/// A malformed or impossible instruction, from encoding or decoding bytecode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpcodeError {
+    Unknown(u8),
+    OperandCount { opcode: &'static str, expected: usize, got: usize },
+    OperandOverflow { opcode: &'static str, operand: usize, bytes: usize },
+    Truncated { opcode: &'static str, expected: usize, got: usize },
+    InvalidPatchOffset { offset: usize, len: usize },
+}
+
+impl fmt::Display for OpcodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown(byte) => write!(f, "opcode {byte} undefined"),
+            Self::OperandCount { opcode, expected, got } => {
+                write!(f, "{opcode} expects {expected} operand(s), got {got}")
+            }
+            Self::OperandOverflow { opcode, operand, bytes } => {
+                write!(f, "operand {operand} overflows {bytes}-byte slot for {opcode}")
+            }
+            Self::Truncated { opcode, expected, got } => {
+                write!(f, "truncated {opcode}: needs {expected} operand byte(s), got {got}")
+            }
+            Self::InvalidPatchOffset { offset, len } => {
+                write!(f, "cannot patch instruction at offset {offset} (bytecode len is {len})")
+            }
+        }
+    }
+}
+impl StdError for OpcodeError {}

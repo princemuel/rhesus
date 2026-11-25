@@ -1,6 +1,5 @@
 use std::env;
 use std::io::{self, BufWriter, Write};
-use std::path::PathBuf;
 
 use rhesus_core::errors::Error;
 use rhesus_core::host::WriterHost;
@@ -19,11 +18,13 @@ use crate::user::username;
 pub(crate) fn start(engine: Engine, stack_budget: usize) -> crate::Result<()> {
     let mut rl = MonkeyEditor::new()?;
     rl.set_helper(Some(MonkeyHelper));
-    let history = history_path();
+
+    // `$HOME/.rhesus_history`, or `None` if there is no home directory.
+    let history = env::home_dir().map(|home| home.join(".rhesus_history"));
 
     // a missing history file on the first run is expected.
     if let Some(path) = &history {
-        drop(rl.load_history(path));
+        let _maybe_missing = rl.load_history(path);
     }
 
     let result = run(&mut rl, engine, stack_budget);
@@ -192,9 +193,6 @@ fn banner(out: &mut impl Write, engine: Engine) -> crate::Result<()> {
     writeln!(out, "Hello {name}! Type \"quit\" or press Ctrl+D to exit.")?;
     Ok(out.flush()?)
 }
-
-/// `~/.rhesus_history`, or `None` if there is no home directory.
-fn history_path() -> Option<PathBuf> { env::home_dir().map(|home| home.join(".rhesus_history")) }
 
 #[cfg(test)]
 mod tests {

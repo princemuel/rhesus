@@ -2,6 +2,7 @@
 #![feature(core_io)]
 #![feature(const_trait_impl)]
 #![feature(const_cmp)]
+#![feature(const_convert)]
 
 extern crate alloc;
 
@@ -14,6 +15,7 @@ pub mod host;
 pub mod lexer;
 pub mod macros;
 pub mod object;
+pub mod opcodes;
 pub mod parser;
 pub mod prelude;
 pub mod token;
@@ -26,7 +28,7 @@ use core::str::FromStr;
 
 use crate::environment::Environment;
 use crate::errors::Error;
-use crate::evaluator::{DEFAULT_STACK_BUDGET, eval_program_with_budget};
+use crate::evaluator::{DEFAULT_STACK_BUDGET, Evaluator};
 use crate::host::Host;
 use crate::lexer::Lexer;
 use crate::macros::{define_macros, expand_macros_with_budget};
@@ -106,8 +108,11 @@ impl Session {
                     expand_macros_with_budget(program, &self.macro_env, host, self.stack_budget)
                         .map_err(|err| Error::Eval(err.to_string()))?;
 
-                let value = eval_program_with_budget(&program, &self.env, host, self.stack_budget)
+                let value = Evaluator::new(host)
+                    .with_stack_budget(self.stack_budget)
+                    .eval(&program, &self.env)
                     .map_err(|err| Error::Eval(err.to_string()))?;
+
                 Ok(value.map(|v| v.to_string()))
             }
             Engine::Vm => {

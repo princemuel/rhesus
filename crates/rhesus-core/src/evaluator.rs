@@ -2,7 +2,7 @@ use alloc::borrow::Cow;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::{hint, ptr};
+use core::{fmt, hint, ptr};
 
 use crate::ast::{Block, Expr, InfixOp as Op, PrefixOp, Stmt};
 use crate::builtins;
@@ -17,42 +17,303 @@ use crate::object::{Function, HashKey, Map, Object};
 ///
 /// A caller that runs the interpreter on a bigger stack can allow deeper
 /// recursion with
-/// [`Session::with_stack_budget`][`crate::Session::with_stack_budget`].
+/// [`Session::with_stack_budget`][`crate::Session::with_stack_budget`], or
+/// [`Evaluator::with_stack_budget`] when driving an [`Evaluator`] directly.
 pub const DEFAULT_STACK_BUDGET: usize = 1024 * 1024;
 
-/// State shared by everything evaluated in one run: the host, and how much of
-/// the native stack the run may use.
-pub(crate) struct Ctx<'ctx> {
-    host: &'ctx mut dyn Host,
-    /// Where the stack was when the run started.
-    stack_base: usize,
-    stack_budget: usize,
+/// A tree-walking evaluator.
+///
+/// ```
+/// use rhesus_core::environment::Environment;
+/// use rhesus_core::evaluator::Evaluator;
+/// use rhesus_core::host::TestHost;
+/// use rhesus_core::lexer::Lexer;
+/// use rhesus_core::parser::Parser;
+///
+/// let program = Parser::new(Lexer::new("let x = 20; x + 22")).parse_program().unwrap();
+/// let mut host = TestHost::default();
+/// let value = Evaluator::new(&mut host)
+///     .with_stack_budget(8 * 1024 * 1024)
+///     .eval(&program, &Environment::new())
+///     .unwrap();
+/// assert_eq!(value.unwrap().to_string(), "42");
+/// ```
+pub struct Evaluator<'h> {
+    host: &'h mut dyn Host,
+    stack: StackGuard,
 }
 
-impl<'ctx> Ctx<'ctx> {
-    pub(crate) fn new(host: &'ctx mut dyn Host, stack_budget: usize) -> Self {
-        Self { host, stack_base: stack_address(), stack_budget }
+impl fmt::Debug for Evaluator<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Evaluator").field("stack", &self.stack).finish_non_exhaustive()
+    }
+}
+
+impl<'h> Evaluator<'h> {
+    /// An evaluator that does its I/O through `host` and uses at most
+    /// [`DEFAULT_STACK_BUDGET`] bytes of native stack per run.
+    #[must_use]
+    pub fn new(host: &'h mut dyn Host) -> Self {
+        Self { host, stack: StackGuard::new(DEFAULT_STACK_BUDGET) }
     }
 
-    fn check_stack<'a>(&self) -> Flow<'a, ()> {
+    /// How many bytes of native stack one run may use before it fails with
+    /// [`EvalError::StackOverflow`] instead of crashing the process.
+    ///
+    /// Keep it comfortably below the size of the stack the evaluator runs on.
+    #[must_use]
+    pub const fn with_stack_budget(mut self, bytes: usize) -> Self {
+        self.stack.budget = bytes;
+        self
+    }
+
+    /// Runs a whole program.
+    ///
+    /// A result value of `None` means the last statement produced no
+    /// value (a `let`, or an empty program), so the REPL prints nothing.
+    ///
+    /// The stack budget is measured from where each call to `eval` starts, so
+    /// an evaluator can be reused, and a run that overflows leaves nothing
+    /// behind for the next one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first runtime error, including [`EvalError::StackOverflow`]
+    /// if evaluation needs more than the stack budget. A top-level `return`
+    /// just ends the program with its value.
+    pub fn eval<'a>(
+        &mut self,
+        program: &Block<'a>,
+        env: &Environment<'a>,
+    ) -> Result<Option<Object<'a>>, EvalError<'a>> {
+        self.stack.reset();
+
+        match self.eval_block(program, env) {
+            Ok(value) => Ok(value),
+            Err(Signal::Return(value)) => Ok(Some(value)),
+            Err(Signal::Error(err)) => Err(err),
+        }
+    }
+
+    /// Blocks don't open a new scope. Only function calls do.
+    fn eval_block<'a>(
+        &mut self,
+        block: &Block<'a>,
+        env: &Environment<'a>,
+    ) -> Result<Option<Object<'a>>, Signal<'a>> {
+        block.0.iter().try_fold(None, |_, stmt| self.eval_stmt(stmt, env))
+    }
+
+    fn eval_stmt<'a>(
+        &mut self,
+        stmt: &Stmt<'a>,
+        env: &Environment<'a>,
+    ) -> Result<Option<Object<'a>>, Signal<'a>> {
+        match stmt {
+            Stmt::Expr(expr) => self.eval_expr(expr, env).map(Some),
+            Stmt::Return(expr) => Err(Signal::Return(self.eval_expr(expr, env)?)),
+            Stmt::Let { name, value } => {
+                let value = self.eval_expr(value, env)?;
+                env.set(name, value);
+                Ok(None)
+            }
+        }
+    }
+
+    /// With `quote(expr)`, the argument is *not* evaluated and becomes a
+    /// [`Object::Quote`].
+    ///
+    /// Only `unquote(..)` calls inside it are evaluated, and
+    /// their results spliced in.
+    fn eval_quote<'a>(
+        &mut self,
+        args: &[Expr<'a>],
+        env: &Environment<'a>,
+    ) -> Result<Object<'a>, Signal<'a>> {
+        let [arg] = args else {
+            return Err(EvalError::WrongArgumentCount { expected: 1, got: args.len() }.into());
+        };
+
+        let node = self.eval_unquote_calls(arg, env)?;
+        Ok(Object::Quote(Rc::new(node)))
+    }
+
+    fn eval_unquote_calls<'a>(
+        &mut self,
+        expr: &Expr<'a>,
+        env: &Environment<'a>,
+    ) -> Result<Expr<'a>, Signal<'a>> {
+        expr.clone().try_modify(&mut |node| -> Result<Expr<'a>, Signal<'a>> {
+            match node {
+                Expr::Call { function, args } if is_ident(&function, "unquote") => {
+                    let [arg] = <[Expr<'a>; 1]>::try_from(args).map_err(|args| {
+                        EvalError::WrongArgumentCount { expected: 1, got: args.len() }
+                    })?;
+                    Ok(convert_obj_to_expr(self.eval_expr(&arg, env)?)?)
+                }
+                expr => Ok(expr),
+            }
+        })
+    }
+
+    fn eval_expr<'a>(
+        &mut self,
+        expr: &Expr<'a>,
+        env: &Environment<'a>,
+    ) -> Result<Object<'a>, Signal<'a>> {
+        self.stack.check()?; // it's important to call this here, early in the fn
+
+        match expr {
+            Expr::Int(n) => Ok(Object::Integer(*n)),
+            Expr::Boolean(b) => Ok(Object::Boolean(*b)),
+            Expr::String(s) => Ok(Object::String(s.clone())),
+            // Variables shadow builtins
+            Expr::Ident(name) => env
+                .get(name)
+                .or_else(|| builtins::lookup(name))
+                .ok_or_else(|| Signal::from(EvalError::IdentifierNotFound(name))),
+            Expr::Array(items) => Ok(self.eval_list(items, env)?.into()),
+            Expr::Hash(pairs) => self.eval_hash(pairs, env),
+            Expr::Index { lhs, index } => {
+                let lhs = self.eval_expr(lhs, env)?;
+                let index = self.eval_expr(index, env)?;
+                Ok(eval_index(&lhs, &index)?)
+            }
+            Expr::Prefix { op, rhs } => {
+                let rhs = self.eval_expr(rhs, env)?;
+                Ok(eval_prefix(*op, &rhs)?)
+            }
+            Expr::Infix { lhs, op, rhs } => {
+                let lhs = self.eval_expr(lhs, env)?;
+                let rhs = self.eval_expr(rhs, env)?;
+                Ok(eval_infix(*op, &lhs, &rhs)?)
+            }
+            Expr::If { condition, consequence, alternative } => {
+                let branch = if self.eval_expr(condition, env)?.is_truthy() {
+                    Some(consequence)
+                } else {
+                    alternative.as_ref()
+                };
+
+                match branch {
+                    Some(block) => Ok(self.eval_block(block, env)?.unwrap_or_default()),
+                    None => Ok(Object::Null),
+                }
+            }
+            Expr::Function { params, body } => Ok(Object::Function(closure(params, body, env))),
+            Expr::Macro { params, body } => Ok(Object::Macro(closure(params, body, env))),
+            // `quote` is a special form: its argument must NOT be evaluated
+            // first.
+            Expr::Call { function, args } if is_ident(function, "quote") => {
+                self.eval_quote(args, env)
+            }
+            Expr::Call { function, args } => {
+                let callee = self.eval_expr(function, env)?;
+                let args = self.eval_list(args, env)?;
+                self.apply_function(&callee, args)
+            }
+        }
+    }
+
+    fn eval_list<'a>(
+        &mut self,
+        exprs: &[Expr<'a>],
+        env: &Environment<'a>,
+    ) -> Result<Vec<Object<'a>>, Signal<'a>> {
+        exprs.iter().map(|expr| self.eval_expr(expr, env)).collect()
+    }
+
+    fn eval_hash<'a>(
+        &mut self,
+        pairs: &[(Expr<'a>, Expr<'a>)],
+        env: &Environment<'a>,
+    ) -> Result<Object<'a>, Signal<'a>> {
+        let map = pairs
+            .iter()
+            .map(|(key, value)| {
+                let key = HashKey::try_from(&self.eval_expr(key, env)?)?;
+                Ok((key, self.eval_expr(value, env)?))
+            })
+            .collect::<Result<Map<_, _>, Signal<'a>>>()?;
+
+        Ok(map.into())
+    }
+
+    fn apply_function<'a>(
+        &mut self,
+        callee: &Object<'a>,
+        args: Vec<Object<'a>>,
+    ) -> Result<Object<'a>, Signal<'a>> {
+        match callee {
+            Object::Function(func) => {
+                let scope = bind_params_to_env(func, args)?;
+                Ok(self.eval_func_or_macro_body(func, &scope)?)
+            }
+            Object::Builtin(builtin) => Ok(builtin(&args, self.host)?),
+            other => Err(EvalError::NotAFunction(other.type_name()).into()),
+        }
+    }
+
+    /// Runs a body in `scope`. A `return` ends the call here and goes no
+    /// further.
+    pub(crate) fn eval_func_or_macro_body<'a>(
+        &mut self,
+        func: &Function<'a>,
+        scope: &Environment<'a>,
+    ) -> Result<Object<'a>, EvalError<'a>> {
+        match self.eval_block(&func.body, scope) {
+            Ok(value) => Ok(value.unwrap_or_default()),
+            Err(Signal::Return(value)) => Ok(value),
+            Err(Signal::Error(err)) => Err(err),
+        }
+    }
+}
+
+/// Tracks how much native stack a run has used, and trips before it runs out.
+///
+/// The interpreter recurses once per nested expression and function call, so
+/// a runaway program (`let f = fn() { f() }; f()`) would otherwise crash the
+/// whole process. Instead, [`check`](Self::check) turns it into a catchable
+/// [`EvalError::StackOverflow`].
+///
+/// It works by comparing the address of a local variable with the one taken
+/// when the run started, so it needs no cooperation from the rest of the
+/// evaluator and costs two pointer reads per check.
+#[derive(Clone, Copy, Debug)]
+struct StackGuard {
+    /// Where the stack was when the run started.
+    base: usize,
+    /// How many bytes deeper than `base` the stack may grow.
+    budget: usize,
+}
+
+impl StackGuard {
+    fn new(budget: usize) -> Self { Self { base: Self::address(), budget } }
+
+    /// Starts measuring from here: call it at the start of each run.
+    fn reset(&mut self) { self.base = Self::address(); }
+
+    fn check<'a>(&self) -> Result<(), EvalError<'a>> {
         // it doesn't matter which way the stack grows.
-        if stack_address().abs_diff(self.stack_base) > self.stack_budget {
-            return Err(EvalError::StackOverflow.into());
+        if Self::address().abs_diff(self.base) > self.budget {
+            return Err(EvalError::StackOverflow);
         }
         Ok(())
     }
-}
 
-/// An address inside the current stack frame: a stand-in for the stack pointer.
-///
-/// `black_box` is essential. Without it the compiler sees a local that is never
-/// read or written, and is free to drop it or pick any address for it, for
-/// example a constant. That would make every measurement come out the same, so
-/// the budget would never trip and runaway recursion would crash after all.
-#[inline(never)]
-fn stack_address() -> usize {
-    let marker = 0u8;
-    hint::black_box(ptr::from_ref(&marker)).addr()
+    /// An address inside the current stack frame: a stand-in for the stack
+    /// pointer.
+    ///
+    /// [`black_box`][`core::hint::black_box`] is essential. Without it the
+    /// compiler sees a local that is never read or written, and is free to drop
+    /// it or pick any address for it, for example a constant. That would make
+    /// every measurement come out the same, so the budget would never trip and
+    /// runaway recursion would crash after all.
+    #[inline(never)]
+    fn address() -> usize {
+        let marker = 0u8;
+        hint::black_box(ptr::from_ref(&marker)).addr()
+    }
 }
 
 /// Why evaluation lhs the normal path. `?` propagates both kinds.
@@ -65,178 +326,6 @@ impl<'a> From<EvalError<'a>> for Signal<'a> {
     fn from(err: EvalError<'a>) -> Self { Self::Error(err) }
 }
 
-pub(crate) type Flow<'a, T = Object<'a>> = Result<T, Signal<'a>>;
-
-/// Run a whole program. `Ok(None)` means the last statement produced no value
-/// (a `let`, or an empty program), so the REPL prints nothing.
-///
-/// # Errors
-///
-/// Returns the first runtime error. A top-level `return` just ends the program
-/// with its value.
-pub fn eval_program<'a>(
-    program: &Block<'a>,
-    env: &Environment<'a>,
-    host: &mut dyn Host,
-) -> Result<Option<Object<'a>>, EvalError<'a>> {
-    eval_program_with_budget(program, env, host, DEFAULT_STACK_BUDGET)
-}
-/// [`eval_program`] with an explicit native-stack budget in bytes.
-///
-/// # Errors
-///
-/// As [`eval_program`]; also [`EvalError::StackOverflow`] if evaluation needs
-/// more than `stack_budget` bytes of stack.
-pub fn eval_program_with_budget<'a>(
-    program: &Block<'a>,
-    env: &Environment<'a>,
-    host: &mut dyn Host,
-    stack_budget: usize,
-) -> Result<Option<Object<'a>>, EvalError<'a>> {
-    match eval_block(program, env, &mut Ctx::new(host, stack_budget)) {
-        Ok(value) => Ok(value),
-        Err(Signal::Return(value)) => Ok(Some(value)),
-        Err(Signal::Error(err)) => Err(err),
-    }
-}
-
-/// Blocks don't open a new scope. Only function calls do.
-fn eval_block<'a>(
-    block: &Block<'a>,
-    env: &Environment<'a>,
-    ctx: &mut Ctx<'_>,
-) -> Flow<'a, Option<Object<'a>>> {
-    block.0.iter().try_fold(None, |_, stmt| eval_stmt(stmt, env, ctx))
-}
-
-fn eval_stmt<'a>(
-    stmt: &Stmt<'a>,
-    env: &Environment<'a>,
-    ctx: &mut Ctx<'_>,
-) -> Flow<'a, Option<Object<'a>>> {
-    match stmt {
-        Stmt::Expr(expr) => eval_expr(expr, env, ctx).map(Some),
-        Stmt::Return(expr) => Err(Signal::Return(eval_expr(expr, env, ctx)?)),
-        Stmt::Let { name, value } => {
-            let value = eval_expr(value, env, ctx)?;
-            env.set(name, value);
-            Ok(None)
-        }
-    }
-}
-
-/// With `quote(expr)`, the argument is *not* evaluated and becomes a
-/// [`Object::Quote`].
-///
-/// Only `unquote(..)` calls inside it are evaluated, and
-/// their results spliced in.
-pub(crate) fn eval_quote<'a>(
-    args: &[Expr<'a>],
-    env: &Environment<'a>,
-    ctx: &mut Ctx<'_>,
-) -> Flow<'a> {
-    let [arg] = args else {
-        return Err(EvalError::WrongArgumentCount { expected: 1, got: args.len() }.into());
-    };
-
-    let node = eval_unquote_calls(arg, env, ctx)?;
-    Ok(Object::Quote(Rc::new(node)))
-}
-
-fn eval_unquote_calls<'a>(
-    expr: &Expr<'a>,
-    env: &Environment<'a>,
-    ctx: &mut Ctx<'_>,
-) -> Flow<'a, Expr<'a>> {
-    expr.clone().try_modify(&mut |node| -> Flow<'a, Expr<'a>> {
-        match node {
-            Expr::Call { function, args } if is_ident(&function, "unquote") => {
-                let [arg] = <[Expr<'a>; 1]>::try_from(args).map_err(|args| {
-                    EvalError::WrongArgumentCount { expected: 1, got: args.len() }
-                })?;
-                Ok(convert_obj_to_expr(eval_expr(&arg, env, ctx)?)?)
-            }
-            expr => Ok(expr),
-        }
-    })
-}
-
-pub(crate) fn eval_expr<'a>(expr: &Expr<'a>, env: &Environment<'a>, ctx: &mut Ctx<'_>) -> Flow<'a> {
-    ctx.check_stack()?; // it's important to call this here, early in the fn
-
-    match expr {
-        Expr::Int(n) => Ok(Object::Integer(*n)),
-        Expr::Boolean(b) => Ok(Object::Boolean(*b)),
-        Expr::String(s) => Ok(Object::String(s.clone())),
-        // Variables shadow builtins
-        Expr::Ident(name) => env
-            .get(name)
-            .or_else(|| builtins::lookup(name))
-            .ok_or_else(|| Signal::from(EvalError::IdentifierNotFound(name))),
-        Expr::Array(items) => Ok(eval_list(items, env, ctx)?.into()),
-        Expr::Hash(pairs) => eval_hash(pairs, env, ctx),
-        Expr::Index { lhs, index } => {
-            let lhs = eval_expr(lhs, env, ctx)?;
-            let index = eval_expr(index, env, ctx)?;
-            Ok(eval_index(&lhs, &index)?)
-        }
-        Expr::Prefix { op, rhs } => {
-            let rhs = eval_expr(rhs, env, ctx)?;
-            Ok(eval_prefix(*op, &rhs)?)
-        }
-        Expr::Infix { lhs, op, rhs } => {
-            let lhs = eval_expr(lhs, env, ctx)?;
-            let rhs = eval_expr(rhs, env, ctx)?;
-            Ok(eval_infix(*op, &lhs, &rhs)?)
-        }
-        Expr::If { condition, consequence, alternative } => {
-            let branch = if eval_expr(condition, env, ctx)?.is_truthy() {
-                Some(consequence)
-            } else {
-                alternative.as_ref()
-            };
-
-            match branch {
-                Some(block) => Ok(eval_block(block, env, ctx)?.unwrap_or_default()),
-                None => Ok(Object::Null),
-            }
-        }
-        Expr::Function { params, body } => Ok(Object::Function(closure(params, body, env))),
-        Expr::Macro { params, body } => Ok(Object::Macro(closure(params, body, env))),
-        // `quote` is a special form: its argument must NOT be evaluated first.
-        Expr::Call { function, args } if is_ident(function, "quote") => eval_quote(args, env, ctx),
-        Expr::Call { function, args } => {
-            let callee = eval_expr(function, env, ctx)?;
-            let args = eval_list(args, env, ctx)?;
-            apply_function(&callee, args, ctx)
-        }
-    }
-}
-
-fn eval_list<'a>(
-    exprs: &[Expr<'a>],
-    env: &Environment<'a>,
-    ctx: &mut Ctx<'_>,
-) -> Flow<'a, Vec<Object<'a>>> {
-    exprs.iter().map(|expr| eval_expr(expr, env, ctx)).collect()
-}
-
-fn eval_hash<'a>(
-    pairs: &[(Expr<'a>, Expr<'a>)],
-    env: &Environment<'a>,
-    ctx: &mut Ctx<'_>,
-) -> Flow<'a> {
-    let map = pairs
-        .iter()
-        .map(|(key, value)| {
-            let key = HashKey::try_from(&eval_expr(key, env, ctx)?)?;
-            Ok((key, eval_expr(value, env, ctx)?))
-        })
-        .collect::<Flow<'a, Map<_, _>>>()?;
-
-    Ok(map.into())
-}
-
 /// Out-of-range and negative array indexes, and missing hash keys, give `null`.
 fn eval_index<'a>(lhs: &Object<'a>, index: &Object<'a>) -> Result<Object<'a>, EvalError<'a>> {
     match (lhs, index) {
@@ -247,17 +336,6 @@ fn eval_index<'a>(lhs: &Object<'a>, index: &Object<'a>) -> Result<Object<'a>, Ev
             Ok(map.get(&HashKey::try_from(key)?).cloned().unwrap_or_default())
         }
         _ => Err(EvalError::IndexNotSupported(lhs.type_name())),
-    }
-}
-
-fn apply_function<'a>(callee: &Object<'a>, args: Vec<Object<'a>>, ctx: &mut Ctx<'_>) -> Flow<'a> {
-    match callee {
-        Object::Function(func) => {
-            let scope = bind_params_to_env(func, args)?;
-            Ok(eval_func_or_macro_body(func, &scope, ctx)?)
-        }
-        Object::Builtin(builtin) => Ok(builtin(&args, ctx.host)?),
-        other => Err(EvalError::NotAFunction(other.type_name()).into()),
     }
 }
 
@@ -335,19 +413,6 @@ pub(crate) fn bind_params_to_env<'a>(
     Ok(scope)
 }
 
-/// Runs a body in `scope`. A `return` ends the call here and goes no further.
-pub(crate) fn eval_func_or_macro_body<'a>(
-    func: &Function<'a>,
-    scope: &Environment<'a>,
-    ctx: &mut Ctx<'_>,
-) -> Result<Object<'a>, EvalError<'a>> {
-    match eval_block(&func.body, scope, ctx) {
-        Ok(value) => Ok(value.unwrap_or_default()),
-        Err(Signal::Return(value)) => Ok(value),
-        Err(Signal::Error(err)) => Err(err),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use alloc::string::{String, ToString as _};
@@ -377,14 +442,14 @@ mod tests {
     }
 
     fn eval(input: &str) -> Result<Option<Object<'_>>, EvalError<'_>> {
-        eval_program(&parse(input), &Environment::new(), &mut WriterHost(core::io::sink()))
+        Evaluator::new(&mut WriterHost(core::io::sink())).eval(&parse(input), &Environment::new())
     }
 
     fn eval_with<'a>(
         input: &'a str,
         host: &mut dyn Host,
     ) -> Result<Option<Object<'a>>, EvalError<'a>> {
-        eval_program(&parse(input), &Environment::new(), host)
+        Evaluator::new(host).eval(&parse(input), &Environment::new())
     }
 
     fn assert_value<'a>(input: &'a str, want: &Object<'a>) {
@@ -957,7 +1022,7 @@ let two = "two";
     fn a_stack_overflow_can_be_caught_and_the_session_continues() {
         let env = Environment::new();
         let host = &mut TestHost::default();
-        let mut run = |src| eval_program(&parse(src), &env, host);
+        let mut run = |src| Evaluator::new(host).eval(&parse(src), &env);
 
         assert_eq!(run("let f = fn() { f() };"), Ok(None));
         assert_eq!(run("f()"), Err(EvalError::StackOverflow));
@@ -977,7 +1042,7 @@ let two = "two";
 
         use std::thread;
 
-        const STACK: usize = 64 * 1024 * 1024;
+        const STACK_SIZE: usize = 64 * 1024 * 1024;
         let src = "let count = fn(n) { if (n == 0) { 0 } else { 1 + count(n - 1) } }; count(1000)";
 
         // Too deep for the default budget...
@@ -985,11 +1050,13 @@ let two = "two";
 
         // ...but fine with a budget that matches a stack this size.
         let result = thread::Builder::new()
-            .stack_size(STACK)
+            .stack_size(STACK_SIZE)
             .spawn(move || {
                 let program = parse(src);
                 let host = &mut TestHost::default();
-                eval_program_with_budget(&program, &Environment::new(), host, STACK / 2)
+                Evaluator::new(host)
+                    .with_stack_budget(STACK_SIZE / 2)
+                    .eval(&program, &Environment::new())
                     .map(|value| value.map(|v| v.to_string()))
                     .map_err(|err| err.to_string())
             })
@@ -1004,28 +1071,91 @@ let two = "two";
     #[inline(never)]
     fn address_at_depth(levels: usize) -> usize {
         let padding = [0u8; 512];
-        let address = if levels == 0 { stack_address() } else { address_at_depth(levels - 1) };
+        let address =
+            if levels == 0 { StackGuard::address() } else { address_at_depth(levels - 1) };
         let _unused = hint::black_box(&padding); // keeps this frame alive across the call
         address
     }
 
     #[test]
     fn the_stack_address_really_moves_as_frames_pile_up() {
-        // If the compiler ever turns `stack_address` into a constant, the stack
-        // budget silently stops working. This test fails first.
-        let top = stack_address();
+        // If the compiler ever turns `StackGuard::address` into a constant, the
+        // stack budget silently stops working. This test fails first.
+        let top = StackGuard::address();
         let bottom = address_at_depth(16);
         assert!(
             bottom.abs_diff(top) >= 16 * 512,
-            "stack_address barely moved: {top:#x} vs {bottom:#x}"
+            "StackGuard::address barely moved: {top:#x} vs {bottom:#x}"
         );
+    }
+
+    #[test]
+    fn the_guard_trips_only_once_the_stack_is_deeper_than_its_budget() {
+        let guard = StackGuard::new(16 * 1024);
+
+        assert_eq!(guard.check(), Ok(()));
+        // 8 frames are at least 4 KiB down, 64 frames at least 32 KiB.
+        assert_eq!(at_depth(8, &mut || guard.check()), Ok(()));
+        assert_eq!(at_depth(64, &mut || guard.check()), Err(EvalError::StackOverflow));
+    }
+
+    #[test]
+    fn resetting_the_guard_measures_from_the_new_spot() {
+        let mut guard = StackGuard::new(16 * 1024);
+
+        assert_eq!(at_depth(64, &mut || guard.check()), Err(EvalError::StackOverflow));
+        let result = at_depth(64, &mut || {
+            guard.reset();
+            guard.check()
+        });
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn a_new_evaluator_uses_the_default_budget() {
+        let host = &mut TestHost::default();
+        assert_eq!(Evaluator::new(host).stack.budget, DEFAULT_STACK_BUDGET);
+    }
+
+    #[test]
+    fn one_evaluator_can_run_several_programs() {
+        let env = Environment::new();
+        let host = &mut TestHost::default();
+        let mut evaluator = Evaluator::new(host);
+
+        assert_eq!(evaluator.eval(&parse("let f = fn() { f() };"), &env), Ok(None));
+        assert_eq!(evaluator.eval(&parse("f()"), &env), Err(EvalError::StackOverflow));
+        // A failed run leaves nothing behind: the next one starts afresh.
+        assert_eq!(evaluator.eval(&parse("let g = fn(x) { x }; g(5)"), &env), Ok(Some(int(5))));
+    }
+
+    /// Recurses `levels` frames deep (each at least 512 bytes), then runs `f`
+    /// from there.
+    #[inline(never)]
+    fn at_depth<R>(levels: usize, f: &mut dyn FnMut() -> R) -> R {
+        let padding = [0u8; 512];
+        let result = if levels == 0 { f() } else { at_depth(levels - 1, f) };
+        let _unused = hint::black_box(&padding); // keeps this frame alive across the call
+        result
+    }
+
+    #[test]
+    fn each_run_is_measured_from_where_it_starts_not_where_the_evaluator_was_built() {
+        let host = &mut TestHost::default();
+        let program = parse("1 + 1");
+
+        // Built here, but run ~200 KiB further down the stack: far more than
+        // the 64 KiB budget, which only holds if `eval` re-measures its base.
+        let mut evaluator = Evaluator::new(host).with_stack_budget(64 * 1024);
+        let result = at_depth(400, &mut || evaluator.eval(&program, &Environment::new()));
+        assert_eq!(result, Ok(Some(int(2))));
     }
 
     #[test]
     fn a_tiny_budget_fails_fast() {
         let program = parse("let f = fn(x) { x }; f(1)");
         let host = &mut TestHost::default();
-        let result = eval_program_with_budget(&program, &Environment::new(), host, 0);
+        let result = Evaluator::new(host).with_stack_budget(0).eval(&program, &Environment::new());
         assert_eq!(result, Err(EvalError::StackOverflow));
     }
 
@@ -1045,7 +1175,7 @@ let two = "two";
         // Reading `a` must not copy the elements: that would make `a[i]` O(n).
         let env = Environment::new();
         let host = &mut TestHost::default();
-        drop(eval_program(&parse("let a = [1, 2, 3];"), &env, host));
+        drop(Evaluator::new(host).eval(&parse("let a = [1, 2, 3];"), &env));
 
         let (Some(Object::Array(first)), Some(Object::Array(second))) =
             (env.get("a"), env.get("a"))

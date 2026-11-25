@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use crate::ast::{Block, Expr, Stmt};
 use crate::environment::Environment;
 use crate::errors::EvalError;
-use crate::evaluator::{Ctx, DEFAULT_STACK_BUDGET, bind_params_to_env, eval_func_or_macro_body};
+use crate::evaluator::{DEFAULT_STACK_BUDGET, Evaluator, bind_params_to_env};
 use crate::host::Host;
 use crate::object::{Function, Object};
 
@@ -53,7 +53,7 @@ pub fn expand_macros<'a>(
 ///
 /// Behaves identically to [`expand_macros`], except macro execution is capped
 /// at `stack_budget` bytes of call stack (similar to
-/// [`eval_program_with_budget`](crate::evaluator::eval_program_with_budget)).
+/// [`Evaluator::with_stack_budget`]).
 ///
 /// # Errors
 ///
@@ -66,8 +66,8 @@ pub fn expand_macros_with_budget<'a>(
     host: &mut dyn Host,
     stack_budget: usize,
 ) -> Result<Block<'a>, EvalError<'a>> {
-    let mut ctx = Ctx::new(host, stack_budget);
-    program.try_modify(&mut |expr| expand_macro_call(expr, env, &mut ctx))
+    let mut evaluator = Evaluator::new(host).with_stack_budget(stack_budget);
+    program.try_modify(&mut |expr| expand_macro_call(expr, env, &mut evaluator))
 }
 
 /// Expands `expr` if it is a call to a macro bound in `env`; otherwise returns
@@ -79,7 +79,7 @@ pub fn expand_macros_with_budget<'a>(
 fn expand_macro_call<'a>(
     expr: Expr<'a>,
     env: &Environment<'a>,
-    ctx: &mut Ctx<'_>,
+    evaluator: &mut Evaluator<'_>,
 ) -> Result<Expr<'a>, EvalError<'a>> {
     let Expr::Call { function, args } = &expr else {
         return Ok(expr);
@@ -95,7 +95,7 @@ fn expand_macro_call<'a>(
     let quoted_args = args.iter().map(|arg| Object::Quote(Rc::new(arg.clone()))).collect();
     let scope = bind_params_to_env(&mac, quoted_args)?;
 
-    match eval_func_or_macro_body(&mac, &scope, ctx)? {
+    match evaluator.eval_func_or_macro_body(&mac, &scope)? {
         Object::Quote(node) => Ok(Rc::unwrap_or_clone(node)),
         other => Err(EvalError::MacroMustReturnQuote(other.type_name())),
     }
@@ -129,7 +129,6 @@ mod tests {
     use alloc::string::{String, ToString as _};
 
     use super::*;
-    use crate::evaluator::eval_program;
     use crate::host::TestHost;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
@@ -141,7 +140,7 @@ mod tests {
     }
 
     fn eval(input: &str) -> Result<Option<Object<'_>>, EvalError<'_>> {
-        eval_program(&parse(input), &Environment::new(), &mut TestHost::default())
+        Evaluator::new(&mut TestHost::default()).eval(&parse(input), &Environment::new())
     }
 
     /// Evaluates `input` and returns the source text of the quote it produced.
@@ -177,7 +176,7 @@ mod tests {
         let macro_env = Environment::new();
         let program = define_macros(parse(input), &macro_env);
         let program = expand_macros(program, &macro_env, host).expect("expand error");
-        eval_program(&program, &env, host).expect("eval error")
+        Evaluator::new(host).eval(&program, &env).expect("eval error")
     }
 
     #[test]

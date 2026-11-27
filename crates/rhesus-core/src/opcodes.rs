@@ -41,12 +41,21 @@ macro_rules! define_instructions {
                     )*
                 }
             }
+
+            /// One instance per variant with all operands zeroed, in opcode order:
+            /// `PROTOTYPES[op]` is the instruction whose tag byte is `op`.
+            const PROTOTYPES: &'static [Self] = &[
+                $( define_instructions!(@proto $variant $( ( $tuple_ty ) )? $( { $($field : $struct_ty),+ } )?) ),*
+            ];
         }
     };
 
     (@pat $variant:ident) => { Self::$variant };
     (@pat $variant:ident ( $ty:ty )) => { Self::$variant(_) };
     (@pat $variant:ident { $($field:ident),+ }) => { Self::$variant { .. } };
+    (@proto $variant:ident) => { Instruction::$variant };
+    (@proto $variant:ident ( $ty:ty )) => { Instruction::$variant(0) };
+    (@proto $variant:ident { $($field:ident : $ty:ty),+ }) => { Instruction::$variant { $($field: 0),+ } };
 }
 
 define_instructions! {
@@ -116,111 +125,46 @@ impl Instruction {
     /// - [`OpcodeError::Truncated`] if `bytes` ends before all operands are
     ///   present.
     pub const fn decode(bytes: &[u8]) -> Result<(Self, usize), OpcodeError> {
-        const OP_CONSTANT: u8 = Instruction::Constant(0).opcode();
-        const OP_ADD: u8 = Instruction::Add.opcode();
-        const OP_POP: u8 = Instruction::Pop.opcode();
-        const OP_SUB: u8 = Instruction::Sub.opcode();
-        const OP_MUL: u8 = Instruction::Mul.opcode();
-        const OP_DIV: u8 = Instruction::Div.opcode();
-        const OP_TRUE: u8 = Instruction::True.opcode();
-        const OP_FALSE: u8 = Instruction::False.opcode();
-        const OP_EQUAL: u8 = Instruction::Equal.opcode();
-        const OP_NOT_EQUAL: u8 = Instruction::NotEqual.opcode();
-        const OP_GREATER_THAN: u8 = Instruction::GreaterThan.opcode();
-        const OP_MINUS: u8 = Instruction::Minus.opcode();
-        const OP_BANG: u8 = Instruction::Bang.opcode();
-        const OP_JUMP_NOT_TRUTHY: u8 = Instruction::JumpNotTruthy(0).opcode();
-        const OP_JUMP: u8 = Instruction::Jump(0).opcode();
-        const OP_NULL: u8 = Instruction::Null.opcode();
-        const OP_GET_GLOBAL: u8 = Instruction::GetGlobal(0).opcode();
-        const OP_SET_GLOBAL: u8 = Instruction::SetGlobal(0).opcode();
-        const OP_ARRAY: u8 = Instruction::Array(0).opcode();
-        const OP_HASH: u8 = Instruction::Hash(0).opcode();
-        const OP_INDEX: u8 = Instruction::Index.opcode();
-        const OP_CALL: u8 = Instruction::Call(0).opcode();
-        const OP_RETURN_VALUE: u8 = Instruction::ReturnValue.opcode();
-        const OP_RETURN: u8 = Instruction::Return.opcode();
-        const OP_GET_LOCAL: u8 = Instruction::GetLocal(0).opcode();
-        const OP_SET_LOCAL: u8 = Instruction::SetLocal(0).opcode();
-        const OP_GET_BUILTIN: u8 = Instruction::GetBuiltin(0).opcode();
-        const OP_CLOSURE: u8 = Instruction::Closure { constant: 0, free: 0 }.opcode();
-        const OP_GET_FREE: u8 = Instruction::GetFree(0).opcode();
-        const OP_CURRENT_CLOSURE: u8 = Instruction::CurrentClosure.opcode();
-
         let Some((&op, rest)) = bytes.split_first() else {
             return Err(truncated("Instruction", 1, 0));
         };
 
-        let instruction = match (op, rest) {
-            // 0-operand instructions
-            (OP_ADD, _) => Self::Add,
-            (OP_POP, _) => Self::Pop,
-            (OP_SUB, _) => Self::Sub,
-            (OP_MUL, _) => Self::Mul,
-            (OP_DIV, _) => Self::Div,
-            (OP_TRUE, _) => Self::True,
-            (OP_FALSE, _) => Self::False,
-            (OP_EQUAL, _) => Self::Equal,
-            (OP_NOT_EQUAL, _) => Self::NotEqual,
-            (OP_GREATER_THAN, _) => Self::GreaterThan,
-            (OP_MINUS, _) => Self::Minus,
-            (OP_BANG, _) => Self::Bang,
-            (OP_NULL, _) => Self::Null,
-            (OP_INDEX, _) => Self::Index,
-            (OP_RETURN_VALUE, _) => Self::ReturnValue,
-            (OP_RETURN, _) => Self::Return,
-            (OP_CURRENT_CLOSURE, _) => Self::CurrentClosure,
+        let index = op as usize; // `usize::from` isn't usable here; this widening is lossless
+        if index >= Self::PROTOTYPES.len() {
+            return Err(OpcodeError::Unknown(op));
+        }
+        let proto = Self::PROTOTYPES[index];
+        let operands = proto.encoded_len() - 1;
 
-            // 1-byte operand instructions
-            (OP_CALL, &[v, ..]) => Self::Call(v),
-            (OP_GET_LOCAL, &[v, ..]) => Self::GetLocal(v),
-            (OP_SET_LOCAL, &[v, ..]) => Self::SetLocal(v),
-            (OP_GET_BUILTIN, &[v, ..]) => Self::GetBuiltin(v),
-            (OP_GET_FREE, &[v, ..]) => Self::GetFree(v),
+        let instruction = match (proto, rest) {
+            // 1-byte operand
+            (Self::Call(_), &[v, ..]) => Self::Call(v),
+            (Self::GetLocal(_), &[v, ..]) => Self::GetLocal(v),
+            (Self::SetLocal(_), &[v, ..]) => Self::SetLocal(v),
+            (Self::GetBuiltin(_), &[v, ..]) => Self::GetBuiltin(v),
+            (Self::GetFree(_), &[v, ..]) => Self::GetFree(v),
 
-            // 2-byte big-endian operand instructions
-            (OP_CONSTANT, &[hi, lo, ..]) => Self::Constant(u16::from_be_bytes([hi, lo])),
-            (OP_JUMP_NOT_TRUTHY, &[hi, lo, ..]) => {
+            // 2-byte big-endian operand
+            (Self::Constant(_), &[hi, lo, ..]) => Self::Constant(u16::from_be_bytes([hi, lo])),
+            (Self::JumpNotTruthy(_), &[hi, lo, ..]) => {
                 Self::JumpNotTruthy(u16::from_be_bytes([hi, lo]))
             }
-            (OP_JUMP, &[hi, lo, ..]) => Self::Jump(u16::from_be_bytes([hi, lo])),
-            (OP_GET_GLOBAL, &[hi, lo, ..]) => Self::GetGlobal(u16::from_be_bytes([hi, lo])),
-            (OP_SET_GLOBAL, &[hi, lo, ..]) => Self::SetGlobal(u16::from_be_bytes([hi, lo])),
-            (OP_ARRAY, &[hi, lo, ..]) => Self::Array(u16::from_be_bytes([hi, lo])),
-            (OP_HASH, &[hi, lo, ..]) => Self::Hash(u16::from_be_bytes([hi, lo])),
+            (Self::Jump(_), &[hi, lo, ..]) => Self::Jump(u16::from_be_bytes([hi, lo])),
+            (Self::GetGlobal(_), &[hi, lo, ..]) => Self::GetGlobal(u16::from_be_bytes([hi, lo])),
+            (Self::SetGlobal(_), &[hi, lo, ..]) => Self::SetGlobal(u16::from_be_bytes([hi, lo])),
+            (Self::Array(_), &[hi, lo, ..]) => Self::Array(u16::from_be_bytes([hi, lo])),
+            (Self::Hash(_), &[hi, lo, ..]) => Self::Hash(u16::from_be_bytes([hi, lo])),
 
-            // 3-byte operand instructions
-            (OP_CLOSURE, &[hi, lo, free, ..]) => {
+            // 3-byte operand
+            (Self::Closure { .. }, &[hi, lo, free, ..]) => {
                 Self::Closure { constant: u16::from_be_bytes([hi, lo]), free }
             }
 
-            // Truncated valid opcodes
-            (OP_CALL, _) => return Err(truncated(Self::Call(0).name(), 1, rest.len())),
-            (OP_GET_LOCAL, _) => return Err(truncated(Self::GetLocal(0).name(), 1, rest.len())),
-            (OP_SET_LOCAL, _) => return Err(truncated(Self::SetLocal(0).name(), 1, rest.len())),
-            (OP_GET_BUILTIN, _) => {
-                return Err(truncated(Self::GetBuiltin(0).name(), 1, rest.len()));
-            }
-            (OP_GET_FREE, _) => return Err(truncated(Self::GetFree(0).name(), 1, rest.len())),
+            // No operands: the prototype already is the instruction.
+            (unit, _) if operands == 0 => unit,
 
-            (OP_CONSTANT, _) => return Err(truncated(Self::Constant(0).name(), 2, rest.len())),
-            (OP_JUMP_NOT_TRUTHY, _) => {
-                return Err(truncated(Self::JumpNotTruthy(0).name(), 2, rest.len()));
-            }
-            (OP_JUMP, _) => return Err(truncated(Self::Jump(0).name(), 2, rest.len())),
-            (OP_GET_GLOBAL, _) => return Err(truncated(Self::GetGlobal(0).name(), 2, rest.len())),
-
-            (OP_SET_GLOBAL, _) => return Err(truncated(Self::SetGlobal(0).name(), 2, rest.len())),
-            (OP_ARRAY, _) => return Err(truncated(Self::Array(0).name(), 2, rest.len())),
-            (OP_HASH, _) => return Err(truncated(Self::Hash(0).name(), 2, rest.len())),
-            (OP_CLOSURE, _) => {
-                return Err(truncated(
-                    Self::Closure { constant: 0, free: 0 }.name(),
-                    3,
-                    rest.len(),
-                ));
-            }
-            _ => return Err(OpcodeError::Unknown(op)),
+            // An operand-carrying opcode with too few bytes left.
+            (short, _) => return Err(truncated(short.name(), operands, rest.len())),
         };
 
         Ok((instruction, instruction.encoded_len()))
@@ -282,7 +226,8 @@ impl Instruction {
 
 impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())?;
+        f.write_str(self.name())?;
+
         match *self {
             Self::Constant(v)
             | Self::JumpNotTruthy(v)
@@ -466,6 +411,42 @@ mod tests {
             let bytes: Vec<_> = ins.into();
             assert_eq!(bytes.len(), ins.encoded_len(), "{ins:?}");
             assert_eq!(bytes[0], ins.opcode(), "{ins:?}");
+        }
+    }
+
+    #[test]
+    fn prototypes_are_indexed_by_opcode() {
+        assert_eq!(
+            ALL_INSTRUCTIONS.len(),
+            Instruction::PROTOTYPES.len(),
+            "ALL_INSTRUCTIONS misses a variant"
+        );
+        for (index, proto) in Instruction::PROTOTYPES.iter().enumerate() {
+            assert_eq!(usize::from(proto.opcode()), index, "{proto}");
+        }
+        for (index, ins) in ALL_INSTRUCTIONS.iter().enumerate() {
+            assert_eq!(usize::from(ins.opcode()), index, "{ins}");
+        }
+    }
+
+    #[test]
+    fn every_instruction_round_trips_and_reports_truncation() {
+        for &ins in ALL_INSTRUCTIONS {
+            let mut out = Vec::new();
+            ins.encode(&mut out);
+            assert_eq!(Instruction::decode(&out), Ok((ins, out.len())));
+
+            if out.len() > 1 {
+                let short = &out[..out.len() - 1];
+                assert_eq!(
+                    Instruction::decode(short),
+                    Err(OpcodeError::Truncated {
+                        opcode: ins.name(),
+                        expected: out.len() - 1,
+                        got: out.len() - 2,
+                    })
+                );
+            }
         }
     }
 

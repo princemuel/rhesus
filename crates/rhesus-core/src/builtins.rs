@@ -1,5 +1,5 @@
 use alloc::string::ToString as _;
-use alloc::vec::Vec;
+use core::slice;
 
 use crate::errors::EvalError;
 use crate::host::Host;
@@ -71,17 +71,15 @@ fn rest<'a>(args: &[Object<'a>], _host: &mut dyn Host) -> BuiltinResult<'a> {
 
 fn push<'a>(args: &[Object<'a>], _host: &mut dyn Host) -> BuiltinResult<'a> {
     let [array, value] = expect_args::<2>(args)?;
-    let old = array_arg("push", array)?;
-
-    let mut items = Vec::with_capacity(old.len() + 1);
-    items.extend_from_slice(old);
-    items.push(value.clone());
-    Ok(items.into())
+    Ok(array_arg("push", array)?.iter().chain(slice::from_ref(value)).cloned().collect())
 }
 
 fn puts<'a>(args: &[Object<'a>], host: &mut dyn Host) -> BuiltinResult<'a> {
     for arg in args {
-        host.write_line(&arg.to_string())?;
+        match arg {
+            Object::String(s) => host.write_line(s)?,
+            other => host.write_line(&other.to_string())?,
+        }
     }
     Ok(Object::Null)
 }

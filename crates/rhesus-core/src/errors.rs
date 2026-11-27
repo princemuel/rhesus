@@ -28,8 +28,8 @@ impl StdError for Error {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParseError<'a> {
-    UnexpectedToken { expected: &'static str, got: Token<'a> },
-    UnexpectedEof { expected: &'static str },
+    UnexpectedToken { expected: Expected, got: Token<'a> },
+    UnexpectedEof { expected: Expected },
     InvalidInt(&'a str),
     NestingTooDeep,
 }
@@ -38,8 +38,7 @@ impl ParseError<'_> {
     pub const fn is_incomplete(&self) -> bool {
         matches!(
             self,
-            Self::UnexpectedEof { .. }
-                | Self::UnexpectedToken { got: Token::Illegal('"' | '\\'), .. }
+            Self::UnexpectedEof { .. } | Self::UnexpectedToken { got: Token::Unterminated, .. }
         )
     }
 }
@@ -60,6 +59,32 @@ impl fmt::Display for ParseError<'_> {
     }
 }
 impl StdError for ParseError<'_> {}
+
+/// What the parser wanted at the point it failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expected {
+    /// A fixed token, by its spelling.
+    Token(&'static str),
+    /// A comma, or this closing delimiter.
+    CommaOr(&'static str),
+    Identifier,
+    Expression,
+}
+
+impl Expected {
+    pub(crate) fn of(token: &Token<'_>) -> Self { Self::Token(token.lexeme().unwrap_or("?")) }
+}
+
+impl fmt::Display for Expected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Token(lexeme) => write!(f, "'{lexeme}'"),
+            Self::CommaOr(lexeme) => write!(f, "',' or '{lexeme}'"),
+            Self::Identifier => f.write_str("identifier"),
+            Self::Expression => f.write_str("expr"),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EvalError<'a> {

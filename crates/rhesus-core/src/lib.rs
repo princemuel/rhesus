@@ -34,9 +34,10 @@ use crate::lexer::Lexer;
 use crate::macros::{define_macros, expand_macros_with_budget};
 use crate::parser::Parser;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Engine {
     Vm,
+    #[default]
     Eval,
 }
 
@@ -52,12 +53,15 @@ impl FromStr for Engine {
     }
 }
 
-#[derive(Debug)]
 /// Persistent state across REPL lines (environments, globals, symbol tables)
+#[derive(Debug)]
 pub struct Session {
     pub engine: Engine,
     env: Environment<'static>,
     macro_env: Environment<'static>,
+    /// Set once any macro has been defined; until then the expansion pass is
+    /// skipped.
+    has_macros: bool,
     sources: Vec<Box<str>>,
     stack_budget: usize,
 }
@@ -68,6 +72,7 @@ impl Session {
         Self {
             engine,
             env: Environment::new(),
+            has_macros: false,
             macro_env: Environment::new(),
             sources: Vec::new(),
             stack_budget: DEFAULT_STACK_BUDGET,
@@ -104,11 +109,15 @@ impl Session {
                     .parse_program()
                     .map_err(|errs| Error::Parse(errs.iter().map(ToString::to_string).collect()))?;
 
-                let program = define_macros(program, &self.macro_env);
+                let (program, defined) = define_macros(program, &self.macro_env);
+                self.has_macros |= defined > 0;
 
-                let program =
+                let program = if self.has_macros {
                     expand_macros_with_budget(program, &self.macro_env, host, self.stack_budget)
-                        .map_err(|err| Error::Eval(err.to_string()))?;
+                        .map_err(|err| Error::Eval(err.to_string()))?
+                } else {
+                    program
+                };
 
                 let value = Evaluator::new(host)
                     .with_stack_budget(self.stack_budget)
@@ -204,6 +213,17 @@ mod tests {
     }
 
     #[test]
+    fn macro_pass_is_skipped_until_a_macro_exists() {
+        let mut repl = Repl::new();
+        drop(repl.ok("let a = 1;"));
+        assert!(!repl.session.has_macros);
+
+        drop(repl.ok("let m = macro() { quote(1) };"));
+        assert!(repl.session.has_macros);
+        assert_eq!(repl.ok("m()"), Some("1".into()));
+    }
+
+    #[test]
     fn a_failed_line_does_not_break_the_session() {
         let mut repl = Repl::new();
         drop(repl.ok("let x = 1;"));
@@ -275,5 +295,24 @@ mod tests {
         assert_eq!("eval".parse(), Ok(Engine::Eval));
         let err = "jit".parse::<Engine>().unwrap_err();
         assert_eq!(err, "invalid engine 'jit', expected 'vm' or 'eval'");
+    }
+
+    #[test]
+    fn a_line_can_call_a_function_defined_on_a_later_line() {
+        let mut repl = Repl::new();
+        drop(repl.ok("let f = fn() { g() };"));
+        drop(repl.ok("let g = fn() { 7 };"));
+        assert_eq!(repl.ok("f()"), Some("7".into()));
+    }
+
+    #[test]
+    fn mutual_runaway_recursion_is_a_stack_overflow() {
+        let mut repl = Repl::new();
+        drop(repl.ok("let f = fn() { g() }; let g = fn() { f() };"));
+        assert_eq!(
+            repl.line("f()").unwrap_err(),
+            Error::Eval("stack overflow: recursion too deep".into())
+        );
+        assert_eq!(repl.ok("1 + 1"), Some("2".into()));
     }
 }

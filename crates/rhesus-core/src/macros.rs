@@ -13,22 +13,31 @@ use crate::host::Host;
 use crate::object::{Function, Object};
 
 /// Removes top-level macro definitions from `program` and stores them in `env`.
+/// Also returns how many were defined, so callers can skip expansion if none
+/// exist.
 #[must_use]
-pub fn define_macros<'a>(program: Block<'a>, env: &Environment<'a>) -> Block<'a> {
+pub fn define_macros<'a>(program: Block<'a>, env: &Environment<'a>) -> (Block<'a>, usize) {
     let mut rest = Vec::new();
+    let mut defined = 0;
 
     for stmt in program.0 {
         if let Stmt::Let { name, value: Expr::Macro { params, body } } = stmt {
-            let parent = env.split_for_closure();
             env.set(
                 name,
-                Object::Macro(Rc::new(Function { name: Some(name), params, body, env: parent })),
+                Object::Macro(Rc::new(Function {
+                    name: Some(name),
+                    params,
+                    body,
+                    env: Environment::viewing(env),
+                })),
             );
+
+            defined += 1;
         } else {
             rest.push(stmt);
         }
     }
-    Block(rest)
+    (Block(rest), defined)
 }
 
 /// Replaces every call to a macro bound in `env` with the AST node it returns.
@@ -157,13 +166,13 @@ mod tests {
 
     fn expand(input: &str) -> Block<'_> {
         let env = Environment::new();
-        let program = define_macros(parse(input), &env);
+        let (program, _) = define_macros(parse(input), &env);
         expand_macros(program, &env, &mut TestHost::default()).expect("expand error")
     }
 
     fn expand_error(input: &str) -> String {
         let env = Environment::new();
-        let program = define_macros(parse(input), &env);
+        let (program, _) = define_macros(parse(input), &env);
         expand_macros(program, &env, &mut TestHost::default())
             .expect_err("expected an expansion error")
             .to_string()
@@ -178,7 +187,7 @@ mod tests {
     fn run_with<'a>(input: &'a str, host: &mut TestHost) -> Option<Object<'a>> {
         let env = Environment::new();
         let macro_env = Environment::new();
-        let program = define_macros(parse(input), &macro_env);
+        let (program, _) = define_macros(parse(input), &macro_env);
         let program = expand_macros(program, &macro_env, host).expect("expand error");
         Evaluator::new(host).eval(&program, &env).expect("eval error")
     }
@@ -222,13 +231,14 @@ mod tests {
     #[test]
     fn define_macros_stores_only_macros_and_removes_them() {
         let input = "
-        let number = 1;
-        let function = fn(x, y) { x + y };
-        let mymacro = macro(x, y) { x + y; };";
+    let number = 1;
+    let function = fn(x, y) { x + y };
+    let mymacro = macro(x, y) { x + y; };";
 
         let env = Environment::new();
-        let program = define_macros(parse(input), &env);
+        let (program, defined) = define_macros(parse(input), &env);
 
+        assert_eq!(defined, 1, "exactly one macro was defined");
         assert_eq!(program.0.len(), 2, "the macro definition should be removed");
         assert!(env.get("number").is_none(), "number is not a macro");
         assert!(env.get("function").is_none(), "function is not a macro");

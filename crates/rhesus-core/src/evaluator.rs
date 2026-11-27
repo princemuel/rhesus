@@ -114,36 +114,13 @@ impl<'h> Evaluator<'h> {
             Stmt::Return(expr) => Err(Signal::Return(self.eval_expr(expr, env)?)),
             Stmt::Let { name, value } => {
                 let value = match self.eval_expr(value, env)? {
-                    Object::Function(func) if func.name.is_none() => {
-                        let parent = if func.env.ptr_eq(env) {
-                            env.split_for_closure()
-                        } else {
-                            func.env.clone()
-                        };
-
-                        Object::Function(Rc::new(Function {
-                            name: Some(name),
-                            params: Rc::clone(&func.params),
-                            body: Rc::clone(&func.body),
-                            env: parent,
-                        }))
+                    Object::Function(func) if func.name.is_none() && func.env.ptr_eq(env) => {
+                        Object::Function(named(&func, name, env))
                     }
-
-                    Object::Macro(mac) if mac.name.is_none() => {
-                        let parent = if mac.env.ptr_eq(env) {
-                            env.split_for_closure()
-                        } else {
-                            mac.env.clone()
-                        };
-
-                        Object::Macro(Rc::new(Function {
-                            name: Some(name),
-                            params: Rc::clone(&mac.params),
-                            body: Rc::clone(&mac.body),
-                            env: parent,
-                        }))
+                    Object::Macro(mac) if mac.name.is_none() && mac.env.ptr_eq(env) => {
+                        Object::Macro(named(&mac, name, env))
                     }
-                    other => other,
+                    object => object,
                 };
                 env.set(name, value);
                 Ok(None)
@@ -424,12 +401,17 @@ fn closure<'a>(
         name: None,
         params: Rc::clone(params),
         body: Rc::clone(body),
-        env: env.clone(),
+        env: if env.is_root() { Environment::viewing(env) } else { env.clone() },
     })
 }
 
-pub(crate) fn is_ident(expr: &Expr<'_>, name: &str) -> bool {
-    matches!(expr, Expr::Ident(ident) if *ident == name)
+fn named<'a>(func: &Function<'a>, name: &'a str, env: &Environment<'a>) -> Rc<Function<'a>> {
+    Rc::new(Function {
+        name: Some(name),
+        params: Rc::clone(&func.params),
+        body: Rc::clone(&func.body),
+        env: env.split_for_closure(),
+    })
 }
 
 /// A fresh scope, enclosed by the function's own, with each parameter bound.
@@ -452,6 +434,10 @@ pub(crate) fn bind_params_to_env<'a>(
     }
 
     Ok(scope)
+}
+
+pub(crate) fn is_ident(expr: &Expr<'_>, name: &str) -> bool {
+    matches!(expr, Expr::Ident(ident) if *ident == name)
 }
 
 #[cfg(test)]
@@ -1244,5 +1230,18 @@ let two = "two";
          };
          map([1, 2, 3], fn(x) { x * 2 })";
         assert_eq!(value(map), array([2, 4, 6]));
+    }
+
+    #[test]
+    fn earlier_functions_see_later_globals() {
+        let src = "let isEven = fn(n) { if (n == 0) { true } else { isOdd(n - 1) } };
+               let isOdd  = fn(n) { if (n == 0) { false } else { isEven(n - 1) } };
+               isEven(10)";
+        assert_eq!(value(src), boolean(true)); // I expect "identifier not found: isOdd"
+    }
+
+    #[test]
+    fn let_name_does_not_shadow_a_captured_variable() {
+        assert_eq!(value("let make = fn(y) { fn() { y } }; let y = make(5); y()"), int(5));
     }
 }

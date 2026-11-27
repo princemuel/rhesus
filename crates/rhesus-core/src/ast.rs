@@ -248,13 +248,17 @@ pub enum PrefixOp {
     Minus,
 }
 
-impl fmt::Display for PrefixOp {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl PrefixOp {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Bang => write!(f, "!"),
-            Self::Minus => write!(f, "-"),
+            Self::Bang => "!",
+            Self::Minus => "-",
         }
     }
+}
+impl fmt::Display for PrefixOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.as_str()) }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -269,19 +273,23 @@ pub enum InfixOp {
     Gt,
 }
 
-impl fmt::Display for InfixOp {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl InfixOp {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Plus => write!(f, "+"),
-            Self::Minus => write!(f, "-"),
-            Self::Slash => write!(f, "/"),
-            Self::Asterisk => write!(f, "*"),
-            Self::Eq => write!(f, "=="),
-            Self::NotEq => write!(f, "!="),
-            Self::Lt => write!(f, "<"),
-            Self::Gt => write!(f, ">"),
+            Self::Plus => "+",
+            Self::Minus => "-",
+            Self::Slash => "/",
+            Self::Asterisk => "*",
+            Self::Eq => "==",
+            Self::NotEq => "!=",
+            Self::Lt => "<",
+            Self::Gt => ">",
         }
     }
+}
+impl fmt::Display for InfixOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.as_str()) }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

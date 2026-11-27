@@ -4,6 +4,8 @@ use core::fmt;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Token<'a> {
     Illegal(char),
+    /// A string literal that never closed: missing `"`, or a trailing `\`.
+    Unterminated,
     Eof,
 
     // Identifiers + literals
@@ -47,51 +49,36 @@ pub enum Token<'a> {
     Macro,
 }
 
+impl Token<'_> {
+    #[must_use]
+    #[rustfmt::skip]
+    pub(crate) const fn lexeme(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Assign => "=", Self::Bang => "!",
+            Self::Plus => "+", Self::Minus => "-", Self::Asterisk => "*", Self::Slash => "/",
+            Self::Lt => "<", Self::Gt => ">", Self::Eq => "==", Self::NotEq => "!=",
+            Self::Comma => ",", Self::Semicolon => ";", Self::Colon => ":",
+            Self::LParen => "(", Self::RParen => ")",
+            Self::LBrace => "{", Self::RBrace => "}",
+            Self::LBracket => "[", Self::RBracket => "]",
+            Self::If => "if", Self::Else => "else",
+            Self::Function => "fn", Self::Macro => "macro",
+            Self::Let => "let", Self::Return => "return",
+            Self::True => "true", Self::False => "false",
+            Self::Illegal(_) | Self::Unterminated | Self::Eof | Self::Ident(_) | Self::Int(_) | Self::String(_) => return None,
+        })
+    }
+}
+
 impl fmt::Display for Token<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Illegal(ch) => write!(f, "ILLEGAL({ch})"),
-            Self::Eof => write!(f, "EOF"),
-
-            // Identifiers + literals
-            Self::Ident(ident) => write!(f, "{ident}"),
-            Self::Int(num) => write!(f, "{num}"),
+            Self::Unterminated => f.write_str("unterminated string"),
+            Self::Eof => f.write_str("EOF"),
+            Self::Ident(s) | Self::Int(s) => f.write_str(s),
             Self::String(s) => write!(f, "\"{s}\""),
-
-            // Operators
-            Self::Assign => write!(f, "="),
-            Self::Plus => write!(f, "+"),
-            Self::Minus => write!(f, "-"),
-            Self::Bang => write!(f, "!"),
-            Self::Asterisk => write!(f, "*"),
-            Self::Slash => write!(f, "/"),
-
-            Self::Lt => write!(f, "<"),
-            Self::Gt => write!(f, ">"),
-            Self::Eq => write!(f, "=="),
-            Self::NotEq => write!(f, "!="),
-
-            // Delimiters
-            Self::Comma => write!(f, ","),
-            Self::Semicolon => write!(f, ";"),
-            Self::Colon => write!(f, ":"),
-
-            Self::LParen => write!(f, "("),
-            Self::RParen => write!(f, ")"),
-            Self::LBrace => write!(f, "{{"),
-            Self::RBrace => write!(f, "}}"),
-            Self::LBracket => write!(f, "["),
-            Self::RBracket => write!(f, "]"),
-
-            // Keywords
-            Self::Function => write!(f, "fn"),
-            Self::Let => write!(f, "let"),
-            Self::True => write!(f, "true"),
-            Self::False => write!(f, "false"),
-            Self::If => write!(f, "if"),
-            Self::Else => write!(f, "else"),
-            Self::Return => write!(f, "return"),
-            Self::Macro => write!(f, "macro"),
+            _ => f.write_str(self.lexeme().unwrap_or_default()),
         }
     }
 }

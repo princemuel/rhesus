@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::iter::Peekable;
 
 use crate::ast::{Block, Expr, Infix, Precedence, PrefixOp, Stmt, infix_rule};
-use crate::errors::ParseError;
+use crate::errors::{Expected, ParseError};
 use crate::lexer::Lexer;
 use crate::token::Token;
 
@@ -57,12 +57,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_block(&mut self) -> Result<Block<'a>, ParseError<'a>> {
-        self.expect(&Token::LBrace, "'{'")?;
+        self.expect(Token::LBrace)?;
 
         let mut stmts = Vec::new();
         while !self.eat(&Token::RBrace) {
             if self.tokens.peek().is_none() {
-                return Err(ParseError::UnexpectedEof { expected: "'}'" });
+                return Err(ParseError::UnexpectedEof { expected: Expected::Token("}") });
             }
 
             stmts.push(self.parse_stmt()?);
@@ -84,7 +84,7 @@ impl<'a> Parser<'a> {
     fn parse_let(&mut self) -> Result<Stmt<'a>, ParseError<'a>> {
         self.advance(); // `let`
         let name = self.expect_ident()?;
-        self.expect(&Token::Assign, "'='")?;
+        self.expect(Token::Assign)?;
         let value = self.parse_expr(Precedence::Lowest)?;
         Ok(Stmt::Let { name, value })
     }
@@ -130,7 +130,7 @@ impl<'a> Parser<'a> {
                 },
                 Infix::Index => {
                     let index = self.parse_expr(Precedence::Lowest)?;
-                    self.expect(&Token::RBracket, "']'")?;
+                    self.expect(Token::RBracket)?;
                     Expr::Index { lhs: Box::new(left), index: Box::new(index) }
                 }
             };
@@ -139,7 +139,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_prefix(&mut self) -> Result<Expr<'a>, ParseError<'a>> {
-        match self.next("expr")? {
+        match self.next(Expected::Expression)? {
             Token::Ident(name) => Ok(Expr::Ident(name)),
             Token::Int(val) => {
                 val.parse().map(Expr::Int).map_err(|_err| ParseError::InvalidInt(val))
@@ -151,7 +151,7 @@ impl<'a> Parser<'a> {
             Token::Minus => self.parse_unary(PrefixOp::Minus),
             Token::LParen => {
                 let inner = self.parse_expr(Precedence::Lowest)?;
-                self.expect(&Token::RParen, "')'")?;
+                self.expect(Token::RParen)?;
                 Ok(inner)
             }
             Token::If => self.parse_if(),
@@ -167,7 +167,9 @@ impl<'a> Parser<'a> {
                 self.parse_list(&Token::RBracket, |p| p.parse_expr(Precedence::Lowest))?,
             )),
             Token::LBrace => self.parse_hash(),
-            found => Err(ParseError::UnexpectedToken { expected: "expr", got: found }),
+            found => {
+                Err(ParseError::UnexpectedToken { expected: Expected::Expression, got: found })
+            }
         }
     }
 
@@ -177,10 +179,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_if(&mut self) -> Result<Expr<'a>, ParseError<'a>> {
-        self.expect(&Token::LParen, "'('")?;
+        self.expect(Token::LParen)?;
 
         let condition = Box::new(self.parse_expr(Precedence::Lowest)?);
-        self.expect(&Token::RParen, "')'")?;
+        self.expect(Token::RParen)?;
 
         let consequence = self.parse_block()?;
         let alternative = if self.eat(&Token::Else) { Some(self.parse_block()?) } else { None };
@@ -188,7 +190,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_params_and_body(&mut self) -> Result<(Rc<[&'a str]>, Rc<Block<'a>>), ParseError<'a>> {
-        self.expect(&Token::LParen, "'('")?;
+        self.expect(Token::LParen)?;
         let params = self.parse_list(&Token::RParen, Self::expect_ident)?;
         let body = self.parse_block()?;
         Ok((params.into(), Rc::new(body)))
@@ -206,21 +208,24 @@ impl<'a> Parser<'a> {
             return Ok(items);
         }
 
+        let expected = Expected::CommaOr(close.lexeme().unwrap_or("?"));
         loop {
             items.push(item(self)?);
 
             if self.eat(close) {
                 return Ok(items);
             }
-
-            self.expect(&Token::Comma, "',' or closing delimiter")?;
+            match self.next(expected)? {
+                Token::Comma => {}
+                got => return Err(ParseError::UnexpectedToken { expected, got }),
+            }
         }
     }
 
     fn parse_hash(&mut self) -> Result<Expr<'a>, ParseError<'a>> {
         let pairs = self.parse_list(&Token::RBrace, |p| {
             let key = p.parse_expr(Precedence::Lowest)?;
-            p.expect(&Token::Colon, "':'")?;
+            p.expect(Token::Colon)?;
 
             let value = p.parse_expr(Precedence::Lowest)?;
             Ok((key, value))
@@ -233,21 +238,23 @@ impl<'a> Parser<'a> {
     /// Consume the next token if it equals `expected`.
     fn eat(&mut self, expected: &Token<'a>) -> bool { self.tokens.next_if_eq(expected).is_some() }
 
-    fn next(&mut self, expected: &'static str) -> Result<Token<'a>, ParseError<'a>> {
+    fn next(&mut self, expected: Expected) -> Result<Token<'a>, ParseError<'a>> {
         self.tokens.next().ok_or(ParseError::UnexpectedEof { expected })
     }
 
-    fn expect(&mut self, expected: &Token<'a>, what: &'static str) -> Result<(), ParseError<'a>> {
-        match self.next(what)? {
-            found if found == *expected => Ok(()),
-            found => Err(ParseError::UnexpectedToken { expected: what, got: found }),
+    #[expect(clippy::needless_pass_by_value)]
+    fn expect(&mut self, expected: Token<'a>) -> Result<(), ParseError<'a>> {
+        let label = Expected::of(&expected);
+        match self.next(label)? {
+            found if found == expected => Ok(()),
+            found => Err(ParseError::UnexpectedToken { expected: label, got: found }),
         }
     }
 
     fn expect_ident(&mut self) -> Result<&'a str, ParseError<'a>> {
-        match self.next("identifier")? {
+        match self.next(Expected::Identifier)? {
             Token::Ident(name) => Ok(name),
-            found => Err(ParseError::UnexpectedToken { expected: "identifier", got: found }),
+            got => Err(ParseError::UnexpectedToken { expected: Expected::Identifier, got }),
         }
     }
 
@@ -573,9 +580,18 @@ mod tests {
     fn let_statement_errors() {
         let errs = errors("let x 5;\nlet = 10;\nlet 838383;");
         assert_eq!(errs.len(), 3);
-        assert!(matches!(errs[0], ParseError::UnexpectedToken { expected: "'='", .. }));
-        assert!(matches!(errs[1], ParseError::UnexpectedToken { expected: "identifier", .. }));
-        assert!(matches!(errs[2], ParseError::UnexpectedToken { expected: "identifier", .. }));
+        assert!(matches!(errs[0], ParseError::UnexpectedToken {
+            expected: Expected::Token("="),
+            ..
+        }));
+        assert!(matches!(errs[1], ParseError::UnexpectedToken {
+            expected: Expected::Identifier,
+            ..
+        }));
+        assert!(matches!(errs[2], ParseError::UnexpectedToken {
+            expected: Expected::Identifier,
+            ..
+        }));
     }
 
     #[test]
@@ -595,13 +611,16 @@ mod tests {
         // `{` in expression position is a hash literal, so a block fails at the
         // missing `:`.
         let errs = errors("{ x }");
-        assert!(matches!(errs[0], ParseError::UnexpectedToken { expected: "':'", .. }));
+        assert!(matches!(errs[0], ParseError::UnexpectedToken {
+            expected: Expected::Token(":"),
+            ..
+        }));
     }
 
     #[test]
     fn unterminated_block_is_an_error() {
         let errs = errors("if (x) { x");
-        assert_eq!(errs, [ParseError::UnexpectedEof { expected: "'}'" }]);
+        assert_eq!(errs, [ParseError::UnexpectedEof { expected: Expected::Token("}") }]);
     }
     #[test]
     fn parsing_macro_literals() {
@@ -634,11 +653,11 @@ mod tests {
     #[test]
     fn macro_errors() {
         assert!(matches!(errors("macro x { }")[0], ParseError::UnexpectedToken {
-            expected: "'('",
+            expected: Expected::Token("("),
             ..
         }));
         assert!(matches!(errors("macro(1) { }")[0], ParseError::UnexpectedToken {
-            expected: "identifier",
+            expected: Expected::Identifier,
             ..
         }));
     }
@@ -656,7 +675,10 @@ mod tests {
         // error).
         let errs = errors("fn() { let = 1; 2 }; 3");
         assert_eq!(errs.len(), 1, "{errs:?}");
-        assert!(matches!(errs[0], ParseError::UnexpectedToken { expected: "identifier", .. }));
+        assert!(matches!(errs[0], ParseError::UnexpectedToken {
+            expected: Expected::Identifier,
+            ..
+        }));
     }
 
     #[test]

@@ -93,7 +93,7 @@ impl<'a> Lexer<'a> {
             let rest = self.rest;
             let Some(idx) = rest.find(['"', '\\']) else {
                 self.rest = ""; // unterminated; swallow the remainder
-                return Token::Illegal('"');
+                return Token::Unterminated;
             };
             let (chunk, tail) = rest.split_at(idx);
             self.rest = tail;
@@ -111,7 +111,7 @@ impl<'a> Lexer<'a> {
             buf.push_str(chunk);
 
             let Some(esc) = self.bump() else {
-                return Token::Illegal('\\');
+                return Token::Unterminated;
             };
 
             buf.push(match esc {
@@ -162,6 +162,7 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+    use crate::parser::is_incomplete;
     use crate::token::Token::*;
 
     #[test]
@@ -322,9 +323,20 @@ if (5 < 10) {
     }
 
     #[test]
-    fn unterminated_string_and_dangling_escape_are_illegal() {
-        assert_eq!(Lexer::new("\"abc").next_token(), Illegal('"'));
-        assert_eq!(Lexer::new("\"abc\\").next_token(), Illegal('\\'));
+    fn unterminated_string_and_dangling_escape_are_unterminated() {
+        assert_eq!(Lexer::new("\"abc").next_token(), Unterminated);
+        assert_eq!(Lexer::new("\"abc\\").next_token(), Unterminated);
+    }
+
+    #[test]
+    fn a_bare_backslash_is_just_illegal() {
+        assert_eq!(Lexer::new("\\").next_token(), Illegal('\\'));
+    }
+
+    #[test]
+    fn stray_backslash_is_hopeless_not_incomplete() {
+        assert!(!is_incomplete("1 \\ 2"));
+        assert!(is_incomplete("\"abc\\")); // a dangling escape inside a string stays incomplete
     }
 
     #[test]

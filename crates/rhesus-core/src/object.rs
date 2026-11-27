@@ -47,6 +47,7 @@ impl<'a> TryFrom<&Object<'a>> for HashKey<'a> {
 }
 
 pub struct Function<'a> {
+    pub name: Option<&'a str>,
     pub params: Rc<[&'a str]>,
     pub body: Rc<Block<'a>>,
     pub env: Environment<'a>,

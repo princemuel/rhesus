@@ -19,7 +19,11 @@ pub fn define_macros<'a>(program: Block<'a>, env: &Environment<'a>) -> Block<'a>
 
     for stmt in program.0 {
         if let Stmt::Let { name, value: Expr::Macro { params, body } } = stmt {
-            env.set(name, Object::Macro(Rc::new(Function { params, body, env: env.clone() })));
+            let parent = env.split_for_closure();
+            env.set(
+                name,
+                Object::Macro(Rc::new(Function { name: Some(name), params, body, env: parent })),
+            );
         } else {
             rest.push(stmt);
         }

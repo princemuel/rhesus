@@ -94,14 +94,15 @@ impl Instruction {
     /// Returns the 1-byte opcode discriminant for this instruction (`0..=29`).
     #[must_use]
     pub const fn opcode(self) -> u8 {
-        // SAFETY: `Instruction` is `#[repr(u8)]`, so its first byte is always
-        // the initialized tag discriminant (guaranteed by the Rust Reference).
-        unsafe { *(&raw const self).cast::<u8>() }
+        // SAFETY:
+        // `Instruction` is `#[repr(u8)]`, so its first byte is always
+        // the initialized tag discriminant as stated in the Rust Reference ;)
+        unsafe { *(&raw const self).cast() }
     }
 
     /// Appends this instruction's big-endian bytes to `out`.
     pub fn encode(self, out: &mut Vec<u8>) {
-        let (buf, len) = self.to_array();
+        let (buf, len) = self.as_array();
         out.extend_from_slice(&buf[..len]);
     }
 
@@ -145,6 +146,7 @@ impl Instruction {
         const OP_CLOSURE: u8 = Instruction::Closure { constant: 0, free: 0 }.opcode();
         const OP_GET_FREE: u8 = Instruction::GetFree(0).opcode();
         const OP_CURRENT_CLOSURE: u8 = Instruction::CurrentClosure.opcode();
+
         let Some((&op, rest)) = bytes.split_first() else {
             return Err(truncated("Instruction", 1, 0));
         };
@@ -227,12 +229,12 @@ impl Instruction {
     /// Encoded byte length of this instruction (1 opcode byte + operand bytes
     /// i.e 1..=4).
     #[must_use]
-    const fn encoded_len(self) -> usize { self.to_array().1 }
+    const fn encoded_len(self) -> usize { self.as_array().1 }
 
     /// Encodes this instruction into a 4-byte stack buffer paired with its
     /// valid byte length (1..=4).
     #[must_use]
-    const fn to_array(self) -> ([u8; 4], usize) {
+    const fn as_array(self) -> ([u8; 4], usize) {
         let op = self.opcode();
         match self {
             Self::Add
@@ -322,7 +324,7 @@ const fn truncated(opcode: &'static str, expected: usize, got: usize) -> OpcodeE
 
 impl From<Instruction> for Vec<u8> {
     fn from(ins: Instruction) -> Self {
-        let (buf, len) = ins.to_array();
+        let (buf, len) = ins.as_array();
         buf[..len].to_vec()
     }
 }

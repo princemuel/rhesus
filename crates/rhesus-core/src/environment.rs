@@ -1,6 +1,6 @@
 use alloc::rc::Rc;
 use core::cell::RefCell;
-use core::fmt;
+use core::{fmt, mem};
 
 use crate::object::{Map, Object};
 
@@ -20,6 +20,22 @@ impl<'a> Environment<'a> {
     #[must_use]
     pub fn new_enclosed(outer: &Self) -> Self {
         Self(Rc::new(RefCell::new(Scope { store: Map::new(), outer: Some(outer.clone()) })))
+    }
+
+    #[must_use]
+    pub fn ptr_eq(&self, other: &Self) -> bool { Rc::ptr_eq(&self.0, &other.0) }
+
+    /// Moves existing bindings into a new outer parent while keeping `self`'s
+    /// Rc identity intact so callers holding `self` see subsequent definitions.
+    #[must_use]
+    pub fn split_for_closure(&self) -> Self {
+        let mut inner = self.0.borrow_mut();
+        let store = mem::take(&mut inner.store);
+        let outer = inner.outer.take();
+
+        let parent = Self(Rc::new(RefCell::new(Scope { store, outer })));
+        inner.outer = Some(parent.clone());
+        parent
     }
 
     /// Look inside this scope, then walk outward.

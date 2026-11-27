@@ -113,7 +113,38 @@ impl<'h> Evaluator<'h> {
             Stmt::Expr(expr) => self.eval_expr(expr, env).map(Some),
             Stmt::Return(expr) => Err(Signal::Return(self.eval_expr(expr, env)?)),
             Stmt::Let { name, value } => {
-                let value = self.eval_expr(value, env)?;
+                let value = match self.eval_expr(value, env)? {
+                    Object::Function(func) if func.name.is_none() => {
+                        let parent = if func.env.ptr_eq(env) {
+                            env.split_for_closure()
+                        } else {
+                            func.env.clone()
+                        };
+
+                        Object::Function(Rc::new(Function {
+                            name: Some(name),
+                            params: Rc::clone(&func.params),
+                            body: Rc::clone(&func.body),
+                            env: parent,
+                        }))
+                    }
+
+                    Object::Macro(mac) if mac.name.is_none() => {
+                        let parent = if mac.env.ptr_eq(env) {
+                            env.split_for_closure()
+                        } else {
+                            mac.env.clone()
+                        };
+
+                        Object::Macro(Rc::new(Function {
+                            name: Some(name),
+                            params: Rc::clone(&mac.params),
+                            body: Rc::clone(&mac.body),
+                            env: parent,
+                        }))
+                    }
+                    other => other,
+                };
                 env.set(name, value);
                 Ok(None)
             }
@@ -389,7 +420,12 @@ fn closure<'a>(
     body: &Rc<Block<'a>>,
     env: &Environment<'a>,
 ) -> Rc<Function<'a>> {
-    Rc::new(Function { params: Rc::clone(params), body: Rc::clone(body), env: env.clone() })
+    Rc::new(Function {
+        name: None,
+        params: Rc::clone(params),
+        body: Rc::clone(body),
+        env: env.clone(),
+    })
 }
 
 pub(crate) fn is_ident(expr: &Expr<'_>, name: &str) -> bool {
@@ -398,7 +434,7 @@ pub(crate) fn is_ident(expr: &Expr<'_>, name: &str) -> bool {
 
 /// A fresh scope, enclosed by the function's own, with each parameter bound.
 pub(crate) fn bind_params_to_env<'a>(
-    func: &Function<'a>,
+    func: &Rc<Function<'a>>,
     args: Vec<Object<'a>>,
 ) -> Result<Environment<'a>, EvalError<'a>> {
     if func.params.len() != args.len() {
@@ -406,6 +442,11 @@ pub(crate) fn bind_params_to_env<'a>(
     }
 
     let scope = Environment::new_enclosed(&func.env);
+
+    if let Some(name) = func.name {
+        scope.set(name, Object::Function(Rc::clone(func)));
+    }
+
     for (name, arg) in func.params.iter().zip(args) {
         scope.set(name, arg);
     }
@@ -1040,16 +1081,11 @@ let two = "two";
     fn a_bigger_budget_on_a_bigger_stack_allows_deeper_recursion() {
         extern crate std;
 
-        use std::thread;
-
         const STACK_SIZE: usize = 64 * 1024 * 1024;
         let src = "let count = fn(n) { if (n == 0) { 0 } else { 1 + count(n - 1) } }; count(1000)";
-
-        // Too deep for the default budget...
         assert_error(src, "stack overflow: recursion too deep");
 
-        // ...but fine with a budget that matches a stack this size.
-        let result = thread::Builder::new()
+        let result = std::thread::Builder::new()
             .stack_size(STACK_SIZE)
             .spawn(move || {
                 let program = parse(src);
@@ -1066,8 +1102,8 @@ let two = "two";
         assert_eq!(result, Ok(Some("1000".to_string())));
     }
 
-    /// Calls itself `levels` times, with a frame at least 512 bytes big, and
-    /// returns the stack address seen at the bottom.
+    /// Recurse `levels` times, with a frame at least 512 bytes big,
+    /// and return the stack address seen at the bottom.
     #[inline(never)]
     fn address_at_depth(levels: usize) -> usize {
         let padding = [0u8; 512];

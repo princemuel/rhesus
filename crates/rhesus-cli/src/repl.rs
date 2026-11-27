@@ -187,10 +187,13 @@ fn banner(out: &mut impl Write, engine: Engine) -> crate::Result<()> {
         Engine::Vm => "bytecode VM",
     };
 
-    let name = ["USER", "USERNAME"]
+    let name = ["USER", "LOGNAME", "USERNAME"]
         .into_iter()
-        .find_map(|k| env::var(k).ok().filter(|n| !n.is_empty()))
-        .map_or(Cow::Borrowed("there"), |n| Cow::Owned(n.to_lowercase()));
+        .find_map(env::var_os)
+        .map(|raw| raw.to_string_lossy().into_owned())
+        .map(|s| s.rsplit_once('\\').map_or(s.as_str(), |(_, u)| u).trim().to_lowercase())
+        .filter(|n| !n.is_empty())
+        .map_or(Cow::Borrowed("there"), Cow::Owned);
 
     writeln!(out, "Rhesus {} (in {mode} mode) on {}", env!("CARGO_PKG_VERSION"), env::consts::OS)?;
     writeln!(out, "Hello {name}! Type \"quit\" or press Ctrl+D to exit.")?;

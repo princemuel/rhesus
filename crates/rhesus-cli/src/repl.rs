@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::env;
 use std::io::{self, BufWriter, Write};
 
@@ -12,8 +13,6 @@ use rustyline::hint::Hinter;
 use rustyline::history::DefaultHistory;
 use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::{Editor, Helper};
-
-use crate::user::username;
 
 pub(crate) fn start(engine: Engine, stack_budget: usize) -> crate::Result<()> {
     let mut rl = MonkeyEditor::new()?;
@@ -187,7 +186,11 @@ fn banner(out: &mut impl Write, engine: Engine) -> crate::Result<()> {
         Engine::Eval => "interpreter",
         Engine::Vm => "bytecode VM",
     };
-    let name = username().unwrap_or_else(|| "there".to_owned()).to_lowercase();
+
+    let name = ["USER", "USERNAME"]
+        .into_iter()
+        .find_map(|k| env::var(k).ok().filter(|n| !n.is_empty()))
+        .map_or(Cow::Borrowed("there"), |n| Cow::Owned(n.to_lowercase()));
 
     writeln!(out, "Rhesus {} (in {mode} mode) on {}", env!("CARGO_PKG_VERSION"), env::consts::OS)?;
     writeln!(out, "Hello {name}! Type \"quit\" or press Ctrl+D to exit.")?;

@@ -20,10 +20,10 @@ pub mod parser;
 pub mod prelude;
 pub mod token;
 
-use alloc::borrow::ToOwned as _;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::str::FromStr;
 
 use crate::environment::Environment;
@@ -58,6 +58,7 @@ pub struct Session {
     pub engine: Engine,
     env: Environment<'static>,
     macro_env: Environment<'static>,
+    sources: Vec<Box<str>>,
     stack_budget: usize,
 }
 
@@ -68,6 +69,7 @@ impl Session {
             engine,
             env: Environment::new(),
             macro_env: Environment::new(),
+            sources: Vec::new(),
             stack_budget: DEFAULT_STACK_BUDGET,
         }
     }
@@ -96,7 +98,7 @@ impl Session {
     pub fn eval_line(&mut self, input: &str, host: &mut dyn Host) -> Result<Option<String>, Error> {
         match self.engine {
             Engine::Eval => {
-                let source: &'static str = Box::leak(input.to_owned().into_boxed_str());
+                let source = self.intern_source(input);
 
                 let program = Parser::new(Lexer::new(source))
                     .parse_program()
@@ -120,6 +122,17 @@ impl Session {
                 Ok(Some(format!("[vm] compiled & ran {} bytes", input.len())))
             }
         }
+    }
+
+    fn intern_source(&mut self, input: &str) -> &'static str {
+        let boxed: Box<str> = input.into();
+        let ptr: *const str = &raw const *boxed;
+        self.sources.push(boxed);
+        // SAFETY: `Box<str>` owns a stable heap allocation that will not
+        // move when `self.sources` grows, and `sources` is declared after
+        // `env` and `macro_env` so it outlives all references stored inside
+        // `Session`.
+        unsafe { &*ptr }
     }
 }
 

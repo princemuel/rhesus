@@ -6,12 +6,15 @@ repository.workspace = true
 license.workspace    = true
 publish.workspace    = true
 
+[features]
+lexopt = ["dep:lexopt"]
+
 [[bin]]
 name = "rhesus"
 path = "src/main.rs"
 
 [dependencies]
-lexopt    = "0.3"
+lexopt    = { version = "0.3", optional = true }
 rustyline = "19"
 
 rhesus-core = { path = "../rhesus-core" }

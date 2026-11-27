@@ -236,6 +236,5 @@ panic         = "abort"
 codegen-units = 1
 
 [profile.dist]
-inherits  = "release"
-opt-level = "z"
-strip     = true
+inherits = "release"
+strip    = true
